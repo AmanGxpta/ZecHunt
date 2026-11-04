@@ -8,6 +8,7 @@ import { ANY_CATALOG_PRODUCT, approveOnePurchase } from "../../../lib/bitrefill/
 import { BitrefillPurchaseRejected, BitrefillPurchaseUncertain, CatalogBitrefillBridge } from "../../../lib/bitrefill/bridge";
 import { CATALOG_CATEGORIES, catalogKey, REWARD_CATALOG, sanitizeProviderText } from "../../../lib/bitrefill/catalog";
 import { McpBitrefillAdapterV2 } from "../../../lib/bitrefill/v2";
+import { PurchaseRejectedError } from "../../../lib/providers/types";
 import { FIXTURE_CODE, FIXTURE_KEY, FIXTURE_PIN, RecordedTransport } from "./transport";
 
 function setup(caps: { per?: number; daily?: number; total?: number; live?: boolean } = {}) {
@@ -46,6 +47,8 @@ test("search: every buyable product in the category, with clean titles and live 
     ["subway-india:200", "Subway ₹200", 220], ["swiggy-money-india:250", "Swiggy Money ₹250", 275],
   ]);
   assert.ok(food.every((p) => p.category === "food"));
+  assert.deepEqual(food[0].faceValue, { amountMinor: 5000, currency: "INR" }, "CR-4: face value as the provider states it");
+  assert.ok(food.every((p) => p.faceValue?.currency === "INR" && p.faceValue.amountMinor === Number(p.productId.split(":")[1]) * 100));
   const gaming = await s.bridge.searchEligibleProducts({ ...SEARCH, category: "gaming", maxPriceCents: 120 });
   assert.deepEqual(gaming.map((p) => p.productId), ["google-play-india:50", "google-play-india:100"]);
   assert.equal(s.t.moneyCalls, 0);
@@ -95,7 +98,8 @@ test("buys any catalog product once per claim, consuming one approval", async ()
 test("guards: allowlist, live reprice, approval and caps refuse before buying", async () => {
   const s = setup({ per: 120, total: 200 });
   const rejected = async (p: Promise<unknown>, code: string) => {
-    await assert.rejects(p, (e: unknown) => e instanceof BitrefillPurchaseRejected && e.reasonCode === code);
+    await assert.rejects(p, (e: unknown) => e instanceof BitrefillPurchaseRejected && e instanceof PurchaseRejectedError &&
+      e.name === "BitrefillPurchaseRejected" && e.reasonCode === code);
   };
   await assert.rejects(s.bridge.purchaseApprovedReward({ claimId: "x", productId: "amazon-shopping-vouchers-india:100", expectedMaxPriceCents: 500 }),
     /not allowlisted/);
