@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { HuntCamera, type SubmitResult } from "@/components/hunt/hunt-camera";
+import { requestMotionAccess } from "@/components/hunt/use-camera";
 import { Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr, ModeBadge, Shell, Spinner } from "@/components/ui";
 
 type Mode = "mock" | "live";
@@ -34,6 +36,7 @@ export default function PlayerView({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const claimRef = useRef<ClaimView | null>(null);
+  const [hunt, setHunt] = useState<{ startWon: boolean } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -60,31 +63,40 @@ export default function PlayerView({ id }: { id: string }) {
     return () => { alive = false; clearInterval(t); };
   }, [id]);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true); setError(null);
+  /** Checkpoint code → claim token → winner slot. Used by the camera and the typed form. */
+  async function submitCode(value: string): Promise<SubmitResult> {
     try {
       const cp = await fetch(`/api/quests/${id}/checkpoint`, {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }),
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: value }),
       });
       const cpd = await cp.json();
-      if (!cp.ok) throw new Error(ERRORS[cpd.error] ?? cpd.message ?? "Something went wrong");
+      if (!cp.ok) return { ok: false, error: cpd.error ?? "error", message: ERRORS[cpd.error] ?? cpd.message ?? "Something went wrong" };
       const cl = await fetch(`/api/quests/${id}/claim`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ claimToken: cpd.claimToken }),
       });
       const cld = await cl.json();
-      if (!cl.ok) throw new Error(ERRORS[cld.error] ?? cld.message ?? "Could not claim");
+      if (!cl.ok) return { ok: false, error: cld.error ?? "error", message: ERRORS[cld.error] ?? cld.message ?? "Could not claim" };
       claimRef.current = cld; setClaim(cld);
-      const again = await fetch(`/api/quests/${id}/claim`).then((r) => r.json());
-      if (again.claim) { claimRef.current = again.claim; setClaim(again.claim); }
-      if (again.redemptionData) setRedemption(again.redemptionData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-      const qd = await fetch(`/api/quests/${id}`).then((r) => r.json()).catch(() => null);
-      if (qd?.quest) setQuest(qd.quest);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "network", message: "Connection problem. Try again." };
     } finally {
-      setBusy(false);
+      fetch(`/api/quests/${id}`).then((r) => r.json()).then((qd) => qd?.quest && setQuest(qd.quest)).catch(() => {});
     }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true); setError(null);
+    const r = await submitCode(code);
+    setBusy(false);
+    if (r.ok) { await openCamera(true); return; }
+    setError(r.message);
+  }
+
+  async function openCamera(startWon = false) {
+    await requestMotionAccess();
+    setHunt({ startWon });
   }
 
   if (missing) return <Shell><Card><h1 className="font-display text-2xl">No quest here</h1><p className="mt-2 text-muted">Check the link you were sent.</p></Card></Shell>;
@@ -110,20 +122,26 @@ export default function PlayerView({ id }: { id: string }) {
           ? <RewardPicker questId={id} onChosen={(c) => { claimRef.current = c; setClaim(c); }} />
           : <Victory claim={claim} redemption={redemption} />
       ) : quest.status === "active" ? (
-        <form onSubmit={submit} className="mt-4">
-          <Card className="space-y-4">
-            <label htmlFor="code" className="block font-display text-xl">Found the checkpoint?</label>
-            <p className="-mt-2 text-sm text-muted">Enter the six-digit code shown there. First correct code wins.</p>
-            <input id="code" inputMode="numeric" autoComplete="one-time-code" pattern="\d{6}" maxLength={6} required
-              value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              className="w-full rounded-xl border border-line bg-ink-2 px-4 py-4 text-center font-mono text-4xl tracking-[0.5em] text-lantern outline-none placeholder:text-line focus:border-lantern/70"
-              placeholder="······" />
-            {error && <ErrorNote>{error}</ErrorNote>}
-            <Button type="submit" disabled={busy || code.length !== 6} className="w-full">
-              {busy ? <><Spinner /> Checking…</> : "Claim the reward"}
-            </Button>
+        <div className="mt-4 space-y-3">
+          <Card className="space-y-4 border-lantern/30">
+            <p className="font-display text-xl">Found the checkpoint?</p>
+            <p className="-mt-2 text-sm text-muted">Scan its QR code with your camera. First one to the chest wins.</p>
+            <Button onClick={() => openCamera(false)} className="w-full">📷 Open camera &amp; scan</Button>
           </Card>
-        </form>
+          <form onSubmit={submit}>
+            <Card className="space-y-3">
+              <label htmlFor="code" className="block text-sm text-muted">No camera? Type the six-digit code instead</label>
+              <input id="code" inputMode="numeric" autoComplete="one-time-code" pattern="\d{6}" maxLength={6} required
+                value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                className="w-full rounded-xl border border-line bg-ink-2 px-4 py-3 text-center font-mono text-3xl tracking-[0.5em] text-lantern outline-none placeholder:text-line focus:border-lantern/70"
+                placeholder="······" />
+              {error && <ErrorNote>{error}</ErrorNote>}
+              <Button type="submit" variant="ghost" disabled={busy || code.length !== 6} className="w-full">
+                {busy ? <><Spinner /> Checking…</> : "Claim with code"}
+              </Button>
+            </Card>
+          </form>
+        </div>
       ) : quest.status === "paused" ? (
         <Card className="mt-4 text-center">
           <p className="font-display text-xl">Paused by the organiser</p>
@@ -136,8 +154,9 @@ export default function PlayerView({ id }: { id: string }) {
         </Card>
       ) : quest.status === "exhausted" ? (
         <Card className="mt-4 text-center">
-          <p className="font-display text-2xl">Someone got there first</p>
-          <p className="mt-2 text-muted">This quest’s reward has been claimed. Better luck on the next hunt.</p>
+          <p className="text-4xl" aria-hidden>🗝️</p>
+          <p className="mt-2 font-display text-2xl">Someone got there first</p>
+          <p className="mt-2 text-muted">This chest has already been opened. Better luck on the next hunt.</p>
           {error && <p className="mt-3 text-sm text-ember">{error}</p>}
         </Card>
       ) : (
@@ -154,6 +173,10 @@ export default function PlayerView({ id }: { id: string }) {
       <p className="mt-3 text-xs leading-5 text-muted/80">
         No wallet or account needed. This browser holds an anonymous session so only you can see your reward.
       </p>
+      {hunt && (
+        <HuntCamera questId={id} questTitle={quest.title} startWon={hunt.startWon} submitCode={submitCode}
+          onClose={() => setHunt(null)} onDone={() => setHunt(null)} />
+      )}
     </Shell>
   );
 }
@@ -207,7 +230,7 @@ function Victory({ claim, redemption }: { claim: ClaimView; redemption: string |
   );
 }
 
-interface RewardOption { productId: string; name: string; category: string; priceCents: number; priceInr: number }
+interface RewardOption { productId: string; name: string; category: string; priceCents: number; priceInr: number; faceInr: number; imageUrl: string | null }
 interface Recommendation { productId: string; reason: string; source: "agent" | "rule" }
 
 interface RewardsResponse {
@@ -222,6 +245,8 @@ async function fetchRewards(questId: string): Promise<{ ok: boolean; data: Rewar
     return { ok: false, data: { message: "Couldn’t load rewards. Check your connection." } };
   }
 }
+
+const CATEGORY_ICON: Record<string, string> = { food: "🍔", shopping: "🛍️", gaming: "🎮" };
 
 const PICK_ERRORS: Record<string, string> = {
   reward_unavailable: "That one just went out of stock or changed price. Pick another.",
@@ -302,10 +327,18 @@ function RewardPicker({ questId, onChosen }: { questId: string; onChosen: (c: Cl
                 <button key={o.productId} type="button" role="radio" aria-checked={on} onClick={() => setSelected(o.productId)}
                   className={`w-full rounded-xl border px-4 py-3 text-left transition ${on ? "border-lantern bg-lantern/10" : "border-line hover:border-lantern/40"}`}>
                   <span className="flex items-center justify-between gap-3">
-                    <span className="font-medium text-fg">{o.name}</span>
+                    <span className="flex min-w-0 items-center gap-3">
+                      {o.imageUrl
+                        // eslint-disable-next-line @next/next/no-img-element
+                        ? <img src={o.imageUrl} alt="" className="h-10 w-10 shrink-0 rounded-lg bg-white object-contain p-1" />
+                        : <span aria-hidden className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-ink-2 text-lg">{CATEGORY_ICON[o.category] ?? "🎁"}</span>}
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium text-fg">{o.name}</span>
+                        <span className="block text-xs text-muted">{CATEGORY_LABEL[o.category] ?? o.category} · worth {formatInr(o.faceInr)}</span>
+                      </span>
+                    </span>
                     {recommended && <span className="shrink-0 rounded-full bg-lantern/15 px-2 py-0.5 text-[11px] uppercase tracking-[0.14em] text-lantern">Suggested</span>}
                   </span>
-                  <span className="mt-0.5 block text-xs text-muted">{CATEGORY_LABEL[o.category] ?? o.category}</span>
                   {recommended && rec?.reason && <span className="mt-2 block text-sm text-muted">“{rec.reason}”</span>}
                 </button>
               );

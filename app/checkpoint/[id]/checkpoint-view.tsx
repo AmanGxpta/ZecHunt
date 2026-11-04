@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { checkpointPayload } from "@/components/hunt/scanner";
+import { Qr } from "@/components/qr";
 import { ErrorNote, Mark } from "@/components/ui";
 import { loadSecrets } from "@/lib/client/creator-store";
 
@@ -56,21 +58,21 @@ export default function CheckpointView({ id }: { id: string }) {
             <p className="max-w-sm text-lg text-muted">Waiting for the quest to be funded. The code will work once it’s live.</p>
           ) : null}
           {code.status === "active" && (<>
-          <div className="relative">
-            <svg width="300" height="300" viewBox="0 0 100 100" className="-rotate-90" aria-hidden>
-              <circle cx="50" cy="50" r="46" fill="none" stroke="var(--line)" strokeWidth="2" />
-              <circle cx="50" cy="50" r="46" fill="none" stroke="var(--lantern)" strokeWidth="2.5" strokeLinecap="round"
-                strokeDasharray={`${pct * 289} 289`} style={{ transition: "stroke-dasharray .25s linear" }} />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <p aria-live="polite" className="whitespace-nowrap font-mono text-5xl font-semibold tracking-[0.08em] text-lantern">
-                {code.code.slice(0, 3)}<span className="text-lantern/40"> </span>{code.code.slice(3)}
-              </p>
-              <p className="mt-3 font-mono text-sm text-muted">changes in {Math.ceil(left / 1000)}s</p>
+          <div className="rounded-3xl border border-lantern/40 bg-panel p-4 shadow-[0_0_60px_#f2b54522]">
+            <Qr value={checkpointPayload(id, code.code)} size={264} label="Checkpoint QR code for players to scan" />
+            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-line" aria-hidden>
+              <div className="h-full bg-lantern transition-[width] duration-200 ease-linear" style={{ width: `${pct * 100}%` }} />
             </div>
           </div>
+          <div>
+            <p aria-live="polite" className="whitespace-nowrap font-mono text-4xl font-semibold tracking-[0.08em] text-lantern">
+              {code.code.slice(0, 3)}<span className="text-lantern/40"> </span>{code.code.slice(3)}
+            </p>
+            <p className="mt-2 font-mono text-sm text-muted">new code in {Math.ceil(left / 1000)}s</p>
+          </div>
           <p className="max-w-sm text-sm leading-6 text-muted">
-            Show this to players who reach you. They type it into the quest page. The first one to do it wins.
+            Players scan this QR with the quest page’s camera, or type the six digits. The first one to do it wins.
+            Both change every minute, so a photo goes stale.
           </p>
           </>)}
         </>
