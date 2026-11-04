@@ -1,6 +1,6 @@
 # zechunt Bitrefill integration
 
-Status: **live catalog verified; no invoice created and no event credit spent**. REST v2 account access and a real delivery still need credentials and a one-use human approval.
+Status: **live catalog verified; no invoice created and no event credit spent**. The locally configured API key returned HTTP 401 from both REST and MCP on 4 Nov 2026. A valid key and a one-use human approval are still needed for a real delivery.
 
 ## Live read-only findings, 4 Nov 2026
 
@@ -13,7 +13,7 @@ bitrefill --json get-product-details --product_id swiggy-money-india
 
 `swiggy-money-india` was in stock. It is a `food` gift card with `recipient_type: none`. The ₹50 package had `payment_price: "0.55"` and `payment_currency: "USD"`; the ₹100 package was $1.10. Prices and stock can change, so the adapter fetches them again before spending. Airtel India ₹10 was $0.11 but requires a phone number, which the current `BitrefillAdapter` purchase interface cannot pass. The live adapter therefore exposes only the Swiggy ₹50 food reward.
 
-Official API references: [products](https://docs.bitrefill.com/reference/get_products-id.md), [invoices](https://docs.bitrefill.com/reference/post_invoices.md), [balance](https://docs.bitrefill.com/reference/get_accounts-balance.md), [orders](https://docs.bitrefill.com/reference/get_orders-id.md).
+Official API references: [eCommerce MCP](https://docs.bitrefill.com/docs/ecommerce-mcp), [MCP partner guide](https://docs.bitrefill.com/docs/mcp-partner-integration-guide), [orders](https://docs.bitrefill.com/reference/get_orders-id.md).
 
 ## Product handoff
 
@@ -23,7 +23,6 @@ Official API references: [products](https://docs.bitrefill.com/reference/get_pro
 new RestBitrefillAdapter({
   apiKey: process.env.BITREFILL_API_KEY!,
   dbPath: process.env.ZECHUNT_BITREFILL_DB!,
-  accountPricesAreUsd: true, // only after checking the account's currency
   livePurchases: process.env.ZECHUNT_LIVE_PURCHASES === "true",
   perPurchaseCapCents: 55,
   dailyCapCents: 55,
@@ -33,9 +32,9 @@ new RestBitrefillAdapter({
 
 The adapter defaults to dry run. In live mode, it returns no eligible products until a human records one unexpired approval for the exact Swiggy ₹50 reward and a maximum price. The product must be approved **before** a player claims: the current claim route selects and fulfills immediately. Keep the approval SQLite file on persistent storage and inaccessible from public routes or agent tools.
 
-The backend must still verify a funded quest and reserve the winner before calling `purchaseApprovedReward`; the product service currently does this. The adapter independently checks the allowlist, live product price, USD account balance, per-purchase cap, daily cap, total cap, one-use approval, and unique claim. It persists a `RESERVED` attempt before `POST /invoices` with `payment_method: "balance"` and `auto_pay: true`. An unknown POST result is never retried automatically. Only an invoice with an order whose status is `delivered` produces redemption data. Do not log that data.
+The backend must still verify a funded quest and reserve the winner before calling `purchaseApprovedReward`; the product service currently does this. The adapter independently checks the allowlist, live USD quote, per-purchase cap, daily cap, total cap, one-use approval, and unique claim. It persists a `RESERVED` attempt before MCP `buy-products` with `payment_method: "balance"` and **`balance_currency: "USD"`**, selecting the USD sub-account explicitly. An unknown purchase result is never retried automatically. Only an invoice with an order whose status is `delivered` produces redemption data. Do not log that data.
 
-No production API key was available during this spike. The REST product response shape and balance currency must be checked with the dedicated Bitrefill account before enabling `livePurchases`. A zero-balance account can first create an unpaid invoice with a crypto payment method through a separate manual smoke test; do not interpret that as delivery.
+The local API key failed authentication, so the USD balance and MCP purchase call remain unverified against the dedicated account. Replace or correct the key before enabling `livePurchases`. The explicit `balance_currency` parameter is documented by Bitrefill; no live purchase has been attempted.
 
 ## Approval and spend state
 

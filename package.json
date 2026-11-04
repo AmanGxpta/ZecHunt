@@ -12,6 +12,7 @@
     "worker": "node --import tsx workers/run.ts"
   },
   "dependencies": {
+    "@toon-format/toon": "^2.3.1",
     "@types/qrcode": "^1.5.5",
     "next": "16.4.5",
     "qrcode": "^1.5.4",

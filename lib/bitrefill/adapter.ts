@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { decode as decodeToon } from "@toon-format/toon";
 import type { BitrefillAdapter, PurchaseOrderStatus, RewardProduct } from "../providers/types";
 
 const PRODUCT_ID = "swiggy-money-india";
@@ -15,9 +16,10 @@ interface Options {
   perPurchaseCapCents?: number;
   dailyCapCents?: number;
   totalCapCents?: number;
-  /** Required when REST packages expose only `price` in the account currency. */
-  accountPricesAreUsd?: boolean;
   baseUrl?: string;
+  mcpUrl?: string;
+  /** Deprecated compatibility option; MCP quotes and purchases explicitly use USD. */
+  accountPricesAreUsd?: boolean;
   fetchImpl?: typeof fetch;
 }
 
@@ -30,7 +32,6 @@ interface ProductDetail {
   packages: Array<{
     value?: string | number;
     package_value?: string;
-    price?: string | number;
     payment_price?: string;
     payment_currency?: string;
   }>;
@@ -94,11 +95,12 @@ function initialize(db: DatabaseSync): void {
   );`);
 }
 
-/** REST v2 adapter. It cannot purchase until a human records a one-use approval. */
+/** Bitrefill MCP purchase adapter. It cannot purchase until a human records a one-use approval. */
 export class RestBitrefillAdapter implements BitrefillAdapter {
   private readonly db: DatabaseSync;
   private readonly fetchImpl: typeof fetch;
   private readonly baseUrl: string;
+  private readonly mcpUrl: string;
 
   constructor(private readonly options: Options) {
     if (!options.apiKey) throw new Error("Bitrefill API key is required");
@@ -107,6 +109,7 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     initialize(this.db);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.baseUrl = options.baseUrl ?? "https://api.bitrefill.com/v2";
+    this.mcpUrl = options.mcpUrl ?? "https://api.bitrefill.com/mcp";
   }
 
   close(): void { this.db.close(); }
@@ -114,7 +117,7 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
   async searchEligibleProducts(input: { country: string; category: string; maxPriceCents: number }): Promise<RewardProduct[]> {
     if (input.country !== "IN" || input.category !== "food") return [];
     const product = await this.getProduct();
-    const priceCents = packagePrice(product, this.options.accountPricesAreUsd === true);
+    const priceCents = packagePrice(product);
     if (priceCents > input.maxPriceCents || priceCents > (this.options.perPurchaseCapCents ?? 500)) return [];
     if (this.options.livePurchases && !this.getApproval(priceCents)) return [];
     return [{ productId: REWARD_ID, name: "Swiggy Money ₹50", category: "food", priceCents }];
@@ -138,13 +141,9 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     // Reprice immediately before spending. The proposal's price is a ceiling,
     // never authority to buy an unavailable or more expensive package.
     const product = await this.getProduct();
-    const priceCents = packagePrice(product, this.options.accountPricesAreUsd === true);
+    const priceCents = packagePrice(product);
     const cap = Math.min(input.expectedMaxPriceCents, this.options.perPurchaseCapCents ?? 500);
     if (!Number.isSafeInteger(cap) || priceCents > cap) throw new Error("Bitrefill price exceeds approved maximum");
-    const balance = await this.api<{ balance: number; currency: string }>("GET", "/accounts/balance");
-    if (balance.currency !== "USD" || usdToCents(balance.balance) < priceCents) {
-      throw new Error("USD Bitrefill balance is insufficient or unavailable");
-    }
 
     const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
@@ -175,16 +174,16 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     }
 
     // A crash after this POST leaves RESERVED in the database. Never replay it.
-    const invoice = await this.api<Invoice>("POST", "/invoices", {
-      products: [{ product_id: PRODUCT_ID, quantity: 1, value: PACKAGE_VALUE }],
+    const invoice = await this.mcpTool<{ invoice_id: string; status?: string }>("buy-products", {
+      cart_items: [{ product_id: PRODUCT_ID, package_value: String(PACKAGE_VALUE) }],
       payment_method: "balance",
-      auto_pay: true,
+      balance_currency: "USD",
     });
-    if (!invoice.id) throw new Error("Bitrefill returned no invoice ID; reconcile manually");
+    if (!invoice.invoice_id) throw new Error("Bitrefill returned no invoice ID; reconcile manually");
     this.db.prepare(
       "UPDATE bitrefill_attempts SET invoice_id = ?, state = ? WHERE claim_id = ?",
-    ).run(invoice.id, invoice.status, input.claimId);
-    return { invoiceId: invoice.id, status: invoice.status };
+    ).run(invoice.invoice_id, invoice.status ?? "pending", input.claimId);
+    return { invoiceId: invoice.invoice_id, status: invoice.status ?? "pending" };
   }
 
   async getOrderStatus(invoiceId: string): Promise<PurchaseOrderStatus> {
@@ -211,7 +210,44 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
   }
 
   private async getProduct(): Promise<ProductDetail> {
-    return this.api<ProductDetail>("GET", `/products/${PRODUCT_ID}`);
+    return this.mcpTool<ProductDetail>("get-product-details", {
+      product_id: PRODUCT_ID,
+      currency: "USD",
+    });
+  }
+
+  private async mcpTool<T>(name: string, args: Record<string, unknown>): Promise<T> {
+    const response = await this.fetchImpl(this.mcpUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${this.options.apiKey}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name, arguments: args },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`Bitrefill MCP ${name} returned HTTP ${response.status}`);
+    const raw = await response.text();
+    const eventData = raw.startsWith("event:") || raw.startsWith("data:")
+      ? raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).at(-1)?.slice(5).trim()
+      : raw;
+    let message: { result?: { isError?: boolean; content?: Array<{ type: string; text?: string }>; structuredContent?: unknown }; error?: unknown };
+    try { message = JSON.parse(eventData ?? ""); }
+    catch { throw new Error("Invalid Bitrefill MCP response"); }
+    if (message.error || message.result?.isError) throw new Error(`Bitrefill MCP ${name} failed`);
+    const structured = message.result?.structuredContent;
+    if (structured && typeof structured === "object") return structured as T;
+    const text = message.result?.content?.find((part) => part.type === "text")?.text;
+    if (!text) throw new Error(`Bitrefill MCP ${name} returned no result`);
+    try { return JSON.parse(text) as T; }
+    catch {
+      try { return decodeToon(text) as T; }
+      catch { throw new Error(`Bitrefill MCP ${name} returned unreadable data`); }
+    }
   }
 
   private async api<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
@@ -231,18 +267,15 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
   }
 }
 
-function packagePrice(product: ProductDetail, accountPricesAreUsd: boolean): number {
+function packagePrice(product: ProductDetail): number {
   if (product.id !== PRODUCT_ID || product.country_code !== "IN" ||
       !product.in_stock || product.recipient_type !== "none" ||
       !Array.isArray(product.packages)) throw new Error("Swiggy ₹50 reward is unavailable");
   const pack = product.packages.find((p) => String(p.value ?? p.package_value) === String(PACKAGE_VALUE));
-  if (!pack || (pack.payment_currency && pack.payment_currency !== "USD")) {
+  if (!pack || pack.payment_currency !== "USD") {
     throw new Error("Swiggy ₹50 USD package is unavailable");
   }
-  if (!pack.payment_price && !accountPricesAreUsd) {
-    throw new Error("Confirm the Bitrefill account's price currency is USD before spending");
-  }
-  const cents = usdToCents(pack.payment_price ?? pack.price ?? "");
+  const cents = usdToCents(pack.payment_price ?? "");
   if (cents <= 0) throw new Error("Invalid Bitrefill package price");
   return cents;
 }
