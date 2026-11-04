@@ -10,11 +10,18 @@ Only tick an item with real provider evidence. Mock runs do not count.
 | 4 | First claim accepted | ✅ on a live-funded quest (DGS) | reward step was mock and failed: no mock item ≤ $1 (fixed) |
 | 5 | Duplicate claim rejected (`quest_exhausted`, token replay `invalid_token`) | ✅ two-phone run on a live-funded quest (4 Nov, via tunnel) + tests | |
 | 6 | Over-cap product refused, zero purchase calls | ✅ tests / ☐ live catalog | |
-| 7 | Approved Bitrefill order with a real invoice ID | ☐ | |
-| 8 | Delivered status + redemption shown to the winner only | ☐ | |
+| 7 | Approved Bitrefill order with a real invoice ID | ✅ policy-approved, paid from the USD balance ($25.00 → $24.45) | `3923a98e-e06e-4775-b8ea-d0db067a3683` (Swiggy Money ₹50, 4 Nov 20:35 IST) |
+| 8 | Delivered status + redemption shown to the winner only | ✅ delivered; revealed after manual reconciliation (see note) | quest `pb5PFV6ri22z` |
 
 ## Human acceptance run (4 Nov 2026, evening IST)
 Production build behind a Cloudflare tunnel; laptop (creator) + two phones. Passed:
 the app working on phones, quest creation, live 0.01 TAZ funding auto-activating the quest, the rotating checkpoint code,
 the first player winning (reward: mock), a second player rejected, the checkpoint stopping after the win, and a per-player wrong-guess limit
 that still let another player win. Bitrefill reward was still mock in this run.
+
+## First live purchase: what happened
+The adapter's `buy-products` call created and paid the invoice, but the adapter could not read an invoice ID from the reply.
+The app correctly froze the claim as `NEEDS_RECONCILIATION`, with no retry and no second charge.
+The invoice was matched manually: one invoice, same product, same minute.
+Once it was linked, the worker's REST status check returned `delivered`, and the code was revealed to the winner's session.
+Follow-up: diagnose the `buy-products` reply handling (error now logged) and add automatic reconciliation via `list-invoices`.
