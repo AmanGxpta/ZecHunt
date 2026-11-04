@@ -73,8 +73,19 @@ interface AttemptRow {
   invoice_id: string | null;
 }
 
+interface BalanceEntry {
+  payment_method?: string;
+  balance_currency?: string;
+  amount_base?: number;
+  decimals?: number;
+}
+
+/** Ledger states. REFUSED = the provider provably refused before executing (no invoice, no charge). */
+type AttemptState = "RESERVED" | "UNCERTAIN" | "INVOICED" | "REFUSED";
+
 class McpError extends Error {
-  constructor(readonly code: "timeout" | "transport_error" | "unparseable_response" | "provider_error") {
+  /** auth_refused: HTTP 401, the request was not authenticated, so no tool ran. */
+  constructor(readonly code: "timeout" | "transport_error" | "unparseable_response" | "provider_error" | "auth_refused") {
     super(`Bitrefill MCP ${code}`);
   }
 }
@@ -147,17 +158,25 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
   async purchaseApprovedReward(req: PurchaseRequest): Promise<PurchaseResult> {
     const reject = (reasonCode: Extract<PurchaseResult, { kind: "rejected" }>["reasonCode"]): PurchaseResult =>
       ({ kind: "rejected", attemptId: req.attemptId, reasonCode });
-    if (!this.options.livePurchases) return reject("purchases_disabled");
-    if (!req.attemptId || !req.claimId || !req.approval.approvalId ||
-        !this.allowed(req.productId, req.packageValue)) return reject("not_allowlisted");
+    if (!req.attemptId || !req.claimId || !req.approval?.approvalId) return reject("approval_mismatch");
+    // A prior attempt is answered from the ledger BEFORE any policy check: if the
+    // freeze switch or allowlist changed since, a charged attempt must still read as
+    // charged/uncertain, never as "rejected" (R5). And it never reaches buy-products (R3).
     const prior = this.getAttempt(req.attemptId);
     if (prior) {
       if (prior.claim_id !== req.claimId || prior.product_id !== req.productId ||
-          prior.package_value !== req.packageValue || prior.approval_id !== req.approval.approvalId) return reject("duplicate_attempt");
+          prior.package_value !== req.packageValue ||
+          // A row rebuilt by reconcileAttempt never saw the original approval id.
+          (!prior.approval_id.startsWith("recovered:") && prior.approval_id !== req.approval.approvalId)) {
+        return reject("duplicate_attempt");
+      }
       if (prior.invoice_id) return { kind: "invoiced", attemptId: req.attemptId,
         invoiceId: prior.invoice_id, status: "unknown" };
+      if (prior.state === "REFUSED") return reject("provider_refused");
       return { kind: "uncertain", attemptId: req.attemptId, reasonCode: "provider_error" };
     }
+    if (!this.options.livePurchases) return reject("purchases_disabled");
+    if (!this.allowed(req.productId, req.packageValue)) return reject("not_allowlisted");
     if (req.approval.productId !== req.productId || req.approval.packageValue !== req.packageValue ||
         !Number.isSafeInteger(req.approval.maxSpendUsdCents) || req.approval.maxSpendUsdCents <= 0) return reject("approval_mismatch");
     if (!Number.isSafeInteger(req.approval.expiresAt) || req.approval.expiresAt <= Date.now()) return reject("approval_expired");
@@ -168,6 +187,11 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     if (quote.requiresRecipientInput) return reject("recipient_input_required");
     const cents = quote.quotedPrice.amountMinor;
     if (cents > req.approval.maxSpendUsdCents || cents > (this.options.perPurchaseCapCents ?? 55)) return reject("repriced_over_cap");
+    // Read-only balance check. Refusing here is certain (no buy-products call). A failed
+    // or unrecognized balance reply also refuses: we don't spend into a provider we can't read.
+    const balance = await this.usdBalanceCents();
+    if (balance === null) return reject("unavailable");
+    if (balance < cents) return reject("insufficient_balance");
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -177,9 +201,13 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
         this.db.exec("ROLLBACK");
         return reject("duplicate_attempt");
       }
-      const all = this.db.prepare("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts").get() as { cents: number };
+      // Every attempt that may have charged counts, including uncertain ones. Only a
+      // provably refused attempt is excluded.
+      const all = this.db.prepare(
+        "SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED'",
+      ).get() as { cents: number };
       const today = this.db.prepare(
-        "SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE created_at >= ?",
+        "SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED' AND created_at >= ?",
       ).get(new Date().setUTCHours(0, 0, 0, 0)) as { cents: number };
       if (all.cents + cents > (this.options.totalCapCents ?? 500) ||
           today.cents + cents > (this.options.dailyCapCents ?? 500)) {
@@ -204,13 +232,21 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
         payment_method: "balance", balance_currency: "USD",
       });
     } catch (error) {
-      const reasonCode = error instanceof McpError ? error.code : "provider_error";
-      this.setUncertain(req.attemptId);
+      if (error instanceof McpError && error.code === "auth_refused") {
+        // HTTP 401: the MCP server did not authenticate the request, so buy-products never
+        // executed and no invoice exists (verified 4 Nov 2026: an invalid key gets a bare
+        // 401 before any tool runs). Every other failure, including a tool-level
+        // "insufficient balance" error after execution, stays uncertain.
+        this.setState(req.attemptId, "REFUSED");
+        return reject("provider_refused");
+      }
+      const reasonCode = error instanceof McpError && error.code !== "auth_refused" ? error.code : "provider_error";
+      this.setState(req.attemptId, "UNCERTAIN");
       return { kind: "uncertain", attemptId: req.attemptId, reasonCode };
     }
     const invoice = unwrapInvoice(reply);
     if (!invoice) {
-      this.setUncertain(req.attemptId);
+      this.setState(req.attemptId, "UNCERTAIN");
       return { kind: "uncertain", attemptId: req.attemptId, reasonCode: "missing_invoice_id" };
     }
     try {
@@ -226,8 +262,11 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     const allowed = this.allowed(req.productId, req.packageValue);
     if (!allowed || req.quotedPrice.currency !== "USD" ||
         !Number.isSafeInteger(req.quotedPrice.amountMinor) || req.quotedPrice.amountMinor <= 0 ||
-        !Number.isSafeInteger(req.startedAt)) return { kind: "unavailable", reasonCode: "invalid_request" };
+        !Number.isSafeInteger(req.startedAt) || !Array.isArray(req.excludeInvoiceIds) ||
+        !Array.isArray(req.competingAttempts)) return { kind: "unavailable", reasonCode: "invalid_request" };
     const prior = this.getAttempt(req.attemptId);
+    // Provably refused: no invoice can belong to it. Never adopt someone else's.
+    if (prior?.state === "REFUSED") return { kind: "not_found" };
     if (prior && (prior.claim_id !== req.claimId || prior.product_id !== req.productId ||
         prior.package_value !== req.packageValue || prior.quoted_cents !== req.quotedPrice.amountMinor)) {
       return { kind: "unavailable", reasonCode: "attempt_mismatch" };
@@ -278,13 +317,24 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     if (prior?.invoice_id && prior.invoice_id !== match.id) {
       return { kind: "unavailable", reasonCode: "attempt_already_invoiced" };
     }
+    // CR-1: the app's ledger is authoritative for other unresolved attempts. Any of them
+    // that could have produced this invoice (same product, package and quoted price,
+    // started at or before it) makes the match ambiguous. This holds even when this
+    // adapter's own ledger was lost; the local check below is the second guard.
+    if (req.competingAttempts.some((a) => a.attemptId !== req.attemptId &&
+        a.productId === req.productId && a.packageValue === req.packageValue &&
+        a.quotedPrice?.currency === req.quotedPrice.currency &&
+        a.quotedPrice.amountMinor === req.quotedPrice.amountMinor &&
+        Number.isFinite(a.startedAt) && a.startedAt <= match.createdAt)) {
+      return { kind: "ambiguous", candidateInvoiceIds: [match.id] };
+    }
     // The provider has no claim correlation field. A competing local reservation
     // makes this candidate ambiguous even if only one invoice is currently paid.
     try {
       this.db.exec("BEGIN IMMEDIATE");
       if (this.db.prepare(`SELECT 1 FROM bitrefill_v2_attempts WHERE attempt_id <> ?
         AND product_id = ? AND package_value = ? AND quoted_cents = ?
-        AND invoice_id IS NULL AND created_at <= ? LIMIT 1`).get(
+        AND invoice_id IS NULL AND state <> 'REFUSED' AND created_at <= ? LIMIT 1`).get(
         req.attemptId, req.productId, req.packageValue, req.quotedPrice.amountMinor, match.createdAt,
       )) {
         this.db.exec("ROLLBACK");
@@ -337,9 +387,23 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     return this.db.prepare("SELECT * FROM bitrefill_v2_attempts WHERE attempt_id = ?").get(attemptId) as AttemptRow | undefined;
   }
 
-  private setUncertain(attemptId: string): void {
-    try { this.db.prepare("UPDATE bitrefill_v2_attempts SET state = 'UNCERTAIN' WHERE attempt_id = ?").run(attemptId); }
-    catch { /* The durable RESERVED row still forbids replay. */ }
+  private setState(attemptId: string, state: Exclude<AttemptState, "RESERVED" | "INVOICED">): void {
+    // If this write fails the row stays RESERVED: replay is still forbidden and the
+    // attempt reads as uncertain, which is the safe direction for REFUSED too.
+    try { this.db.prepare("UPDATE bitrefill_v2_attempts SET state = ? WHERE attempt_id = ? AND invoice_id IS NULL").run(state, attemptId); }
+    catch { /* See above. */ }
+  }
+
+  /** Spendable USD balance in cents, or null if it can't be read with certainty. Read-only. */
+  private async usdBalanceCents(): Promise<number | null> {
+    let reply: { balances?: BalanceEntry[] };
+    try { reply = await this.mcpTool("get-balances", { currency: "USD" }); }
+    catch { return null; }
+    if (!Array.isArray(reply?.balances)) return null;
+    const usd = reply.balances.filter((b) => b.payment_method === "balance" && b.balance_currency === "USD");
+    if (usd.length !== 1 || usd[0].decimals !== 2 || !Number.isSafeInteger(usd[0].amount_base) ||
+        usd[0].amount_base! < 0) return null;
+    return usd[0].amount_base!;
   }
 
   private async invoice(invoiceId: string): Promise<InvoiceDetail> {
@@ -358,7 +422,7 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
         signal: AbortSignal.timeout(15_000),
       });
     } catch (error) { throw new McpError(isTimeout(error) ? "timeout" : "transport_error"); }
-    if (!response.ok) throw new McpError("provider_error");
+    if (!response.ok) throw new McpError(response.status === 401 ? "auth_refused" : "provider_error");
     let raw: string;
     try { raw = await response.text(); }
     catch (error) { throw new McpError(isTimeout(error) ? "timeout" : "transport_error"); }
@@ -373,11 +437,15 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     }
     const text = message.result?.content?.find((x) => x.type === "text")?.text;
     if (!text) throw new McpError("unparseable_response");
-    try { return JSON.parse(text) as T; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(text); }
     catch {
-      try { return decodeToon(text) as T; }
+      try { parsed = decodeToon(text); }
       catch { throw new McpError("unparseable_response"); }
     }
+    // TOON decodes almost any text to *something*; every tool we call returns an object.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new McpError("unparseable_response");
+    return parsed as T;
   }
 }
 
