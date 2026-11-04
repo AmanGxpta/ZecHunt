@@ -46,6 +46,15 @@ interface Invoice {
 interface Attempt {
   state: string;
   invoice_id: string | null;
+  reward_id: string;
+  created_at: number;
+}
+
+interface ListedInvoice {
+  invoice_id: string;
+  invoice_status?: string;
+  created_time: string;
+  orders?: Array<{ product_id?: string }>;
 }
 
 export function usdToCents(value: string | number): number {
@@ -131,11 +140,11 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     if (!this.options.livePurchases) throw new Error("Bitrefill purchases are disabled (dry run)");
     if (!input.claimId || input.productId !== REWARD_ID) throw new Error("Product is not allowlisted");
     const prior = this.db.prepare(
-      "SELECT state, invoice_id FROM bitrefill_attempts WHERE claim_id = ?",
+      "SELECT state, invoice_id, reward_id, created_at FROM bitrefill_attempts WHERE claim_id = ?",
     ).get(input.claimId) as Attempt | undefined;
     if (prior) {
       if (prior.invoice_id) return { invoiceId: prior.invoice_id, status: prior.state };
-      throw new Error("Purchase outcome uncertain; reconcile before retrying");
+      return this.reconcileReservedPurchase(input.claimId);
     }
 
     // Reprice immediately before spending. The proposal's price is a ceiling,
@@ -174,16 +183,64 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     }
 
     // A crash after this POST leaves RESERVED in the database. Never replay it.
-    const invoice = await this.mcpTool<{ invoice_id: string; status?: string }>("buy-products", {
+    const purchase = await this.mcpTool<unknown>("buy-products", {
       cart_items: [{ product_id: PRODUCT_ID, package_value: String(PACKAGE_VALUE) }],
       payment_method: "balance",
       balance_currency: "USD",
     });
-    if (!invoice.invoice_id) throw new Error("Bitrefill returned no invoice ID; reconcile manually");
+    const invoice = purchase && typeof purchase === "object" && "response" in purchase
+      ? (purchase as { response: unknown }).response : purchase;
+    if (!invoice || typeof invoice !== "object" ||
+        !("invoice_id" in invoice) || typeof invoice.invoice_id !== "string") {
+      throw new Error(`Bitrefill buy-products returned no invoice ID; payload keys=${safeKeys(purchase)}; reconcile before retrying`);
+    }
+    const status = "status" in invoice && typeof invoice.status === "string" ? invoice.status : "pending";
     this.db.prepare(
       "UPDATE bitrefill_attempts SET invoice_id = ?, state = ? WHERE claim_id = ?",
-    ).run(invoice.invoice_id, invoice.status ?? "pending", input.claimId);
-    return { invoiceId: invoice.invoice_id, status: invoice.status ?? "pending" };
+    ).run(invoice.invoice_id, status, input.claimId);
+    return { invoiceId: invoice.invoice_id, status };
+  }
+
+  /** Read-only provider lookup; only the local invoice association is changed. Never calls buy-products. */
+  async reconcileReservedPurchase(claimId: string): Promise<{ invoiceId: string; status: string }> {
+    const attempt = this.db.prepare(
+      "SELECT state, invoice_id, reward_id, created_at FROM bitrefill_attempts WHERE claim_id = ?",
+    ).get(claimId) as Attempt | undefined;
+    if (!attempt || attempt.reward_id !== REWARD_ID) throw new Error("No matching Bitrefill purchase attempt");
+    if (attempt.invoice_id) return { invoiceId: attempt.invoice_id, status: attempt.state };
+    if (attempt.state !== "RESERVED") throw new Error("Bitrefill attempt is not reserved");
+    const listing = await this.mcpTool<{ invoices?: ListedInvoice[]; count?: number }>("list-invoices", {
+      limit: 20,
+      after: new Date(attempt.created_at).toISOString(),
+      include_orders: true,
+    });
+    if (!Array.isArray(listing.invoices)) throw new Error(`Bitrefill invoice list has no invoices array; payload keys=${safeKeys(listing)}`);
+    if (listing.invoices.length >= 20 || (typeof listing.count === "number" && listing.count > listing.invoices.length)) {
+      throw new Error("Bitrefill invoice list is incomplete; cannot reconcile safely");
+    }
+    const matches = listing.invoices.filter((invoice) =>
+      typeof invoice.invoice_id === "string" &&
+      Number.isFinite(Date.parse(invoice.created_time)) &&
+      Date.parse(invoice.created_time) >= attempt.created_at &&
+      invoice.orders?.length === 1 && invoice.orders[0]?.product_id === PRODUCT_ID);
+    if (matches.length !== 1) throw new Error(`Bitrefill reconciliation found ${matches.length} matching invoices; expected exactly one`);
+    const match = matches[0];
+    const status = match.invoice_status ?? "pending";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.db.prepare("SELECT 1 FROM bitrefill_attempts WHERE invoice_id = ? AND claim_id <> ?").get(match.invoice_id, claimId)) {
+        throw new Error("Bitrefill invoice is already associated with another claim");
+      }
+      const result = this.db.prepare(
+        "UPDATE bitrefill_attempts SET invoice_id = ?, state = ? WHERE claim_id = ? AND invoice_id IS NULL AND state = 'RESERVED'",
+      ).run(match.invoice_id, status, claimId);
+      if (result.changes !== 1) throw new Error("Bitrefill attempt changed during reconciliation");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { invoiceId: match.invoice_id, status };
   }
 
   async getOrderStatus(invoiceId: string): Promise<PurchaseOrderStatus> {
@@ -217,7 +274,8 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
   }
 
   private async mcpTool<T>(name: string, args: Record<string, unknown>): Promise<T> {
-    const response = await this.fetchImpl(this.mcpUrl, {
+    let response: Response;
+    try { response = await this.fetchImpl(this.mcpUrl, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.options.apiKey}`,
@@ -229,24 +287,35 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
         params: { name, arguments: args },
       }),
       signal: AbortSignal.timeout(15_000),
-    });
+    }); }
+    catch (error) {
+      const kind = error instanceof Error ? error.name : "unknown";
+      throw new Error(`Bitrefill MCP ${name} request ${kind === "TimeoutError" || kind === "AbortError" ? "timed out" : `failed (${kind})`}`);
+    }
     if (!response.ok) throw new Error(`Bitrefill MCP ${name} returned HTTP ${response.status}`);
-    const raw = await response.text();
+    let raw: string;
+    try { raw = await response.text(); }
+    catch (error) {
+      const kind = error instanceof Error ? error.name : "unknown";
+      throw new Error(`Bitrefill MCP ${name} response ${kind === "TimeoutError" || kind === "AbortError" ? "timed out" : `failed (${kind})`}`);
+    }
     const eventData = raw.startsWith("event:") || raw.startsWith("data:")
       ? raw.split(/\r?\n/).filter((line) => line.startsWith("data:")).at(-1)?.slice(5).trim()
       : raw;
     let message: { result?: { isError?: boolean; content?: Array<{ type: string; text?: string }>; structuredContent?: unknown }; error?: unknown };
     try { message = JSON.parse(eventData ?? ""); }
-    catch { throw new Error("Invalid Bitrefill MCP response"); }
-    if (message.error || message.result?.isError) throw new Error(`Bitrefill MCP ${name} failed`);
+    catch { throw new Error(`Invalid Bitrefill MCP ${name} response; content-type=${response.headers.get("content-type") ?? "unknown"}`); }
+    if (message.error || message.result?.isError) {
+      throw new Error(`Bitrefill MCP ${name} failed; envelope keys=${safeKeys(message)}; result keys=${safeKeys(message.result)}; isError=${String(message.result?.isError ?? false)}`);
+    }
     const structured = message.result?.structuredContent;
     if (structured && typeof structured === "object") return structured as T;
     const text = message.result?.content?.find((part) => part.type === "text")?.text;
-    if (!text) throw new Error(`Bitrefill MCP ${name} returned no result`);
+    if (!text) throw new Error(`Bitrefill MCP ${name} returned no result; result keys=${safeKeys(message.result)}; isError=${String(message.result?.isError ?? false)}`);
     try { return JSON.parse(text) as T; }
     catch {
       try { return decodeToon(text) as T; }
-      catch { throw new Error(`Bitrefill MCP ${name} returned unreadable data`); }
+      catch { throw new Error(`Bitrefill MCP ${name} returned unreadable data; result keys=${safeKeys(message.result)}; isError=${String(message.result?.isError ?? false)}`); }
     }
   }
 
@@ -265,6 +334,10 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     if (!payload.data) throw new Error("Bitrefill response has no data");
     return payload.data;
   }
+}
+
+function safeKeys(value: unknown): string {
+  return value && typeof value === "object" ? Object.keys(value).slice(0, 20).join(",") : "none";
 }
 
 function packagePrice(product: ProductDetail): number {
