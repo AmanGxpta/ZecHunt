@@ -1,29 +1,23 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+const display = Fraunces({ variable: "--font-display", subsets: ["latin"], axes: ["opsz"] });
+const body = Inter({ variable: "--font-body", subsets: ["latin"] });
+const code = JetBrains_Mono({ variable: "--font-code", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Zechunt",
-  description: "Hide a real reward behind a real-world challenge, funded with shielded Zcash testnet funds.",
+  title: "zecHunt — hide a real reward in the real world",
+  description:
+    "Create a real-world quest, activate it privately with shielded Zcash, and the first person to reach the checkpoint wins a real Bitrefill reward.",
 };
+
+export const viewport: Viewport = { themeColor: "#0a0f0d", width: "device-width", initialScale: 1 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col">{children}</body>
+    <html lang="en" className={`${display.variable} ${body.variable} ${code.variable} h-full antialiased`}>
+      <body className="flex min-h-full flex-col">{children}</body>
     </html>
   );
 }

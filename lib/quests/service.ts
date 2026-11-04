@@ -98,6 +98,8 @@ export interface CreatorQuest extends PublicQuest {
   fundedZatoshis: number;
   activatedAt: number | null;
   fundingEvents: { txid: string; amountZatoshis: number; confirmations: number }[];
+  /** Winner progress for the creator. Never includes redemption data. */
+  winner: { claimStatus: string; productName: string | null; purchaseState: string | null; providerMode: string | null } | null;
 }
 
 function toPublic(q: QuestRow): PublicQuest {
@@ -113,6 +115,19 @@ function toPublic(q: QuestRow): PublicQuest {
   };
 }
 
+function winnerSummary(db: DatabaseSync, questId: string): CreatorQuest["winner"] {
+  const row = db
+    .prepare(
+      `SELECT c.status AS claim_status, p.product_name, p.state, p.provider_mode
+       FROM claims c LEFT JOIN purchase_attempts p ON p.claim_id = c.id
+       WHERE c.quest_id = ? ORDER BY c.created_at LIMIT 1`,
+    )
+    .get(questId) as { claim_status: string; product_name: string | null; state: string | null; provider_mode: string | null } | undefined;
+  return row
+    ? { claimStatus: row.claim_status, productName: row.product_name, purchaseState: row.state, providerMode: row.provider_mode }
+    : null;
+}
+
 function toCreator(db: DatabaseSync, q: QuestRow): CreatorQuest {
   const events = db
     .prepare(
@@ -126,6 +141,7 @@ function toCreator(db: DatabaseSync, q: QuestRow): CreatorQuest {
     expectedZatoshis: q.expected_zatoshis,
     fundedZatoshis: q.funded_zatoshis,
     activatedAt: q.activated_at,
+    winner: winnerSummary(db, q.id),
     fundingEvents: events.map((e) => ({
       txid: e.txid,
       amountZatoshis: Number(e.amount_zatoshis),

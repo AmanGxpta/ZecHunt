@@ -1,196 +1,178 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
+import { Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatUsd, ModeBadge, Shell, Spinner } from "@/components/ui";
 
-import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-
+type Mode = "mock" | "live";
 interface PublicQuest {
-  id: string;
-  title: string;
-  clue: string;
-  rewardCategory: string;
-  rewardCapCents: number;
-  status: string;
-  winnersRemaining: number;
+  id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number;
+  status: "awaiting_funding" | "active" | "exhausted"; winnersRemaining: number; zcashMode: Mode;
+}
+interface ClaimView {
+  claimId: string; claimStatus: string; reason?: string;
+  purchase: { productName: string; priceCents: number; state: string; invoiceId: string | null; providerMode: Mode } | null;
 }
 
-interface ClaimView {
-  claimStatus: string;
-  reason?: string;
-  purchase: { productName: string; priceCents: number; state: string } | null;
-}
+const ERRORS: Record<string, string> = {
+  invalid_code: "That’s not the code. Check the checkpoint and try again.",
+  too_many_attempts: "Too many wrong tries. Take a breather and try again in a few minutes.",
+  quest_exhausted: "Someone got there first. This reward has been claimed.",
+  quest_not_active: "This quest isn’t live yet.",
+  already_claimed: "You’ve already claimed this quest.",
+  invalid_token: "Your claim expired. Enter the current code again.",
+};
 
 export default function PlayerView({ id }: { id: string }) {
   const [quest, setQuest] = useState<PublicQuest | null>(null);
-  const [notFound, setNotFound] = useState(false);
-  const [code, setCode] = useState("");
-  const [claimToken, setClaimToken] = useState<string | null>(null);
+  const [modes, setModes] = useState<{ zcash: Mode; bitrefill: Mode } | null>(null);
+  const [missing, setMissing] = useState(false);
   const [claim, setClaim] = useState<ClaimView | null>(null);
   const [redemption, setRedemption] = useState<string | null>(null);
+  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const loadQuest = useCallback(async () => {
-    const res = await fetch(`/api/quests/${id}`);
-    if (res.status === 404) return setNotFound(true);
-    const data = await res.json();
-    setQuest(data.quest);
-  }, [id]);
-
-  const loadClaim = useCallback(async () => {
-    const res = await fetch(`/api/quests/${id}/claim`);
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.claim) setClaim(data.claim);
-    if (data.redemptionData) setRedemption(data.redemptionData);
-  }, [id]);
+  const claimRef = useRef<ClaimView | null>(null);
 
   useEffect(() => {
-    loadQuest();
-    loadClaim();
-  }, [loadQuest, loadClaim]);
+    let alive = true;
+    const load = async () => {
+      try {
+        const [qr, cr] = await Promise.all([fetch(`/api/quests/${id}`), fetch(`/api/quests/${id}/claim`)]);
+        if (!alive) return;
+        if (qr.status === 404) { setMissing(true); return; }
+        const qd = await qr.json();
+        setQuest(qd.quest); setModes(qd.modes);
+        if (cr.ok) {
+          const cd = await cr.json();
+          if (cd.claim) { claimRef.current = cd.claim; setClaim(cd.claim); }
+          if (cd.redemptionData) setRedemption(cd.redemptionData);
+        }
+      } catch {}
+    };
+    load();
+    // Keep polling while there's something to wait for: activation or fulfillment.
+    const t = setInterval(() => {
+      const c = claimRef.current;
+      if (!c || ["purchase_pending", "reserved"].includes(c.claimStatus) || c.purchase?.state === "INVOICE_CREATED") load();
+    }, 4_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [id]);
 
-  async function checkIn(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
-    setError(null);
+    setBusy(true); setError(null);
     try {
-      const res = await fetch(`/api/quests/${id}/checkpoint`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code }),
+      const cp = await fetch(`/api/quests/${id}/checkpoint`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(messageFor(data.error));
-      setClaimToken(data.claimToken);
+      const cpd = await cp.json();
+      if (!cp.ok) throw new Error(ERRORS[cpd.error] ?? cpd.message ?? "Something went wrong");
+      const cl = await fetch(`/api/quests/${id}/claim`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ claimToken: cpd.claimToken }),
+      });
+      const cld = await cl.json();
+      if (!cl.ok) throw new Error(ERRORS[cld.error] ?? cld.message ?? "Could not claim");
+      claimRef.current = cld; setClaim(cld);
+      const again = await fetch(`/api/quests/${id}/claim`).then((r) => r.json());
+      if (again.claim) { claimRef.current = again.claim; setClaim(again.claim); }
+      if (again.redemptionData) setRedemption(again.redemptionData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
+      const qd = await fetch(`/api/quests/${id}`).then((r) => r.json()).catch(() => null);
+      if (qd?.quest) setQuest(qd.quest);
     } finally {
       setBusy(false);
     }
   }
 
-  async function claimReward() {
-    if (!claimToken) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/quests/${id}/claim`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ claimToken }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(messageFor(data.error));
-      setClaimToken(null);
-      setClaim(data);
-      await loadClaim();
-      await loadQuest();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  if (notFound) {
-    return (
-      <main className="mx-auto max-w-xl px-4 py-16">
-        <h1 className="text-2xl font-semibold text-white">Quest not found</h1>
-        <Link href="/" className="mt-4 inline-block text-amber-300">Back home</Link>
-      </main>
-    );
-  }
-  if (!quest) return <main className="mx-auto max-w-xl px-4 py-16 text-zinc-400">Loading…</main>;
-
-  const isWinner = claim && claim.claimStatus !== "failed";
-  const amount = `$${(quest.rewardCapCents / 100).toFixed(2)}`;
+  if (missing) return <Shell><Card><h1 className="font-display text-2xl">No quest here</h1><p className="mt-2 text-muted">Check the link you were sent.</p></Card></Shell>;
+  if (!quest || !modes) return <Shell><p className="text-muted">Loading quest…</p></Shell>;
 
   return (
-    <main className="mx-auto w-full max-w-xl space-y-8 px-4 py-12">
-      <Link href="/" className="text-sm text-zinc-400 hover:text-zinc-200">← Zechunt</Link>
-
-      <header className="space-y-3">
-        <p className="text-xs uppercase tracking-[0.25em] text-amber-300/80">
-          {quest.winnersRemaining > 0 ? "Open quest" : "Quest closed"}
+    <Shell>
+      <div className="rise">
+        <Eyebrow>{quest.status === "active" ? "Quest is live" : quest.status === "exhausted" ? "Quest complete" : "Not live yet"}</Eyebrow>
+        <h1 className="mt-2 font-display text-4xl leading-tight tracking-tight">{quest.title}</h1>
+        <p className="mt-2 text-muted">
+          Reward: {CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatUsd(quest.rewardCapCents)}
         </p>
-        <h1 className="text-3xl font-semibold text-white">{quest.title}</h1>
-        <p className="text-base leading-7 text-zinc-200">{quest.clue}</p>
-        <p className="text-sm text-zinc-400">Reward up to {amount} in {categoryLabel(quest.rewardCategory)}.</p>
-      </header>
+      </div>
 
-      {claim && (
-        <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-5 text-sm">
-          {isWinner ? (
-            <>
-              <h2 className="text-lg font-semibold text-amber-300">You found it.</h2>
-              <p className="mt-2 text-zinc-200">
-                {claim.purchase ? `${claim.purchase.productName} · status ${claim.purchase.state}` : "Preparing your reward…"}
-              </p>
-              {redemption && (
-                <p className="mt-3 break-all rounded bg-black/40 p-3 font-mono text-zinc-100">{redemption}</p>
-              )}
-            </>
-          ) : (
-            <p className="text-zinc-300">
-              This reward could not be issued{claim.reason ? ` (${claim.reason.replaceAll("_", " ")})` : ""}.
-              The creator has been notified in principle; this demo does not send notifications yet.
-            </p>
-          )}
-        </section>
-      )}
+      <Card className="mt-6">
+        <p className="text-[11px] uppercase tracking-[0.22em] text-muted">The clue</p>
+        <p className="mt-3 font-display text-xl leading-8 text-fg">“{quest.clue}”</p>
+      </Card>
 
-      {!claim && quest.status !== "exhausted" && quest.status === "active" && !claimToken && (
-        <form onSubmit={checkIn} className="space-y-4">
-          <label className="block space-y-2">
-            <span className="text-sm text-zinc-300">Checkpoint code</span>
-            <input
-              inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-3 text-center font-mono text-2xl tracking-[0.4em] text-white"
-              placeholder="000000"
-            />
-          </label>
-          <button type="submit" disabled={busy || code.length !== 6}
-            className="w-full rounded-xl bg-amber-300 px-5 py-3 font-semibold text-zinc-950 disabled:opacity-50">
-            {busy ? "Checking…" : "Check in"}
-          </button>
+      {claim ? (
+        <Victory claim={claim} redemption={redemption} />
+      ) : quest.status === "active" ? (
+        <form onSubmit={submit} className="mt-4">
+          <Card className="space-y-4">
+            <label htmlFor="code" className="block font-display text-xl">Found the checkpoint?</label>
+            <p className="-mt-2 text-sm text-muted">Enter the six-digit code shown there. First correct code wins.</p>
+            <input id="code" inputMode="numeric" autoComplete="one-time-code" pattern="\d{6}" maxLength={6} required
+              value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              className="w-full rounded-xl border border-line bg-ink-2 px-4 py-4 text-center font-mono text-4xl tracking-[0.5em] text-lantern outline-none placeholder:text-line focus:border-lantern/70"
+              placeholder="······" />
+            {error && <ErrorNote>{error}</ErrorNote>}
+            <Button type="submit" disabled={busy || code.length !== 6} className="w-full">
+              {busy ? <><Spinner /> Checking…</> : "Claim the reward"}
+            </Button>
+          </Card>
         </form>
+      ) : quest.status === "exhausted" ? (
+        <Card className="mt-4 text-center">
+          <p className="font-display text-2xl">Someone got there first</p>
+          <p className="mt-2 text-muted">This quest’s reward has been claimed. Better luck on the next hunt.</p>
+          {error && <p className="mt-3 text-sm text-ember">{error}</p>}
+        </Card>
+      ) : (
+        <Card className="mt-4 text-center">
+          <p className="font-display text-xl">Waiting for the creator to fund this quest</p>
+          <p className="mt-2 text-sm text-muted">This page updates on its own.</p>
+        </Card>
       )}
 
-      {claimToken && !claim && (
-        <section className="space-y-4">
-          <p className="text-zinc-200">Checkpoint accepted. You have ten minutes to claim, and only the first claim wins.</p>
-          <button type="button" disabled={busy} onClick={claimReward}
-            className="w-full rounded-xl bg-amber-300 px-5 py-3 font-semibold text-zinc-950 disabled:opacity-50">
-            {busy ? "Claiming…" : "Claim reward"}
-          </button>
-        </section>
-      )}
-
-      {quest.status !== "active" && !claim && (
-        <p className="text-zinc-400">
-          {quest.status === "exhausted" ? "Someone has already won this quest." : "This quest is not open yet."}
-        </p>
-      )}
-
-      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
-    </main>
+      <div className="mt-6 flex flex-wrap gap-2">
+        <ModeBadge mode={quest.zcashMode} what="Zcash funding" />
+        <ModeBadge mode={modes.bitrefill} what="Bitrefill reward" />
+      </div>
+      <p className="mt-3 text-xs leading-5 text-muted/80">
+        No wallet or account needed. This browser holds an anonymous session so only you can see your reward.
+      </p>
+    </Shell>
   );
 }
 
-function categoryLabel(value: string): string {
-  return ({ food: "food & groceries", "mobile-recharge": "mobile recharge", gaming: "gaming & entertainment" } as Record<string, string>)[value] ?? value;
-}
-
-function messageFor(code: string | undefined): string {
-  switch (code) {
-    case "invalid_code": return "That code is not right.";
-    case "too_many_attempts": return "Too many wrong codes. This quest is locked for entries.";
-    case "already_claimed": return "You have already checked in to this quest.";
-    case "quest_exhausted": return "Someone else found it first.";
-    case "quest_not_active": return "This quest is not open right now.";
-    case "invalid_token": return "Your check-in expired. Enter the code again.";
-    default: return "Something went wrong. Please try again.";
-  }
+function Victory({ claim, redemption }: { claim: ClaimView; redemption: string | null }) {
+  const p = claim.purchase;
+  const delivered = claim.claimStatus === "delivered";
+  const pending = claim.claimStatus === "purchase_pending" || claim.claimStatus === "reserved" || p?.state === "INVOICE_CREATED";
+  return (
+    <Card className="mt-4 overflow-hidden border-lantern/40">
+      <div className="-m-5 mb-5 bg-gradient-to-br from-lantern/25 via-lantern/5 to-transparent px-5 py-6">
+        <p className="text-[11px] uppercase tracking-[0.22em] text-lantern">You found it</p>
+        <p className="mt-1 font-display text-3xl">First to the checkpoint 🏆</p>
+      </div>
+      {delivered && p ? (
+        <div className="space-y-4">
+          <p className="text-muted">
+            Your reward: <span className="text-fg">{p.productName}</span> ({formatUsd(p.priceCents)})
+          </p>
+          {redemption ? (
+            <CopyField label={p.providerMode === "mock" ? "Redemption (SIMULATED, not a real code)" : "Your redemption code"} value={redemption} />
+          ) : (
+            <p className="text-sm text-muted">Delivered. Fetching your redemption details…</p>
+          )}
+          {p.providerMode === "mock" && <ModeBadge mode="mock" what="purchase: no money was spent" />}
+        </div>
+      ) : pending ? (
+        <p className="flex items-center gap-2 text-muted"><Spinner /> An agent is buying your reward within the creator’s limit…</p>
+      ) : claim.claimStatus === "needs_reconciliation" ? (
+        <p className="text-muted">Your win is recorded. The purchase needs a manual check before anything is retried. We won’t charge twice. Check back soon.</p>
+      ) : (
+        <p className="text-muted">Your win is recorded, but no eligible reward could be bought ({claim.reason ?? "unavailable"}). The organiser has been flagged.</p>
+      )}
+    </Card>
+  );
 }
