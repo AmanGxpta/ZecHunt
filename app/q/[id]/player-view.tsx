@@ -135,7 +135,7 @@ export default function PlayerView({ id }: { id: string }) {
 
       <div className="mt-6 flex flex-wrap gap-2">
         <ModeBadge mode={quest.zcashMode} what="Zcash funding" />
-        <ModeBadge mode={modes.bitrefill} what="Bitrefill reward" />
+        {modes.bitrefill === "mock" && <ModeBadge mode={modes.bitrefill} what="Bitrefill reward" />}
       </div>
       <p className="mt-3 text-xs leading-5 text-muted/80">
         No wallet or account needed. This browser holds an anonymous session so only you can see your reward.

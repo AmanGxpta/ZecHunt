@@ -105,7 +105,7 @@ export default function ManageView({ id }: { id: string }) {
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <ModeBadge mode={q.zcashMode} what="Zcash funding" />
-          <ModeBadge mode={data.modes.bitrefill} what="Bitrefill reward" />
+          {data.modes.bitrefill === "mock" && <ModeBadge mode={data.modes.bitrefill} what="Bitrefill reward" />}
         </div>
       </div>
 

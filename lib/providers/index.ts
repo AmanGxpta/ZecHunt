@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { DomainError } from "../errors";
-import { RestBitrefillAdapter } from "../bitrefill/adapter";
+import { approveOnePurchase, RestBitrefillAdapter } from "../bitrefill/adapter";
 import { ZkoolZcashAdapter } from "../zcash/zkool";
 import { MockBitrefillAdapter, MockZcashAdapter } from "./mock";
 import type { BitrefillAdapter, Providers, ZcashAdapter } from "./types";
@@ -42,16 +42,42 @@ function liveBitrefill(): BitrefillAdapter {
     throw new DomainError("bitrefill_not_configured", 500, "BITREFILL_API_KEY is required for ZECHUNT_BITREFILL_MODE=live");
   }
   const capCents = Math.min(500, Math.round(Number(process.env.BITREFILL_CREDIT_USD ?? "25") * 100));
-  return new RestBitrefillAdapter({
+  const dbPath = process.env.ZECHUNT_BITREFILL_DB ?? resolve(process.cwd(), ".data/bitrefill.db");
+  const perPurchaseCapCents = Number(process.env.BITREFILL_PER_PURCHASE_CAP_CENTS ?? 55);
+  const adapter = new RestBitrefillAdapter({
     apiKey,
-    dbPath: process.env.ZECHUNT_BITREFILL_DB ?? resolve(process.cwd(), ".data/bitrefill.db"),
+    dbPath,
     // Real balance spending needs this exact opt-in AND a human approval (scripts/bitrefill-approve.ts).
     livePurchases: process.env.ZECHUNT_LIVE_PURCHASES === "true",
     accountPricesAreUsd: process.env.BITREFILL_ACCOUNT_PRICES_ARE_USD === "true",
-    perPurchaseCapCents: Number(process.env.BITREFILL_PER_PURCHASE_CAP_CENTS ?? 55),
+    perPurchaseCapCents,
     dailyCapCents: Number(process.env.BITREFILL_DAILY_CAP_CENTS ?? 55),
     totalCapCents: Math.min(capCents, Number(process.env.BITREFILL_TOTAL_CAP_CENTS ?? 55)),
   });
+  return process.env.ZECHUNT_BITREFILL_AUTO_APPROVE === "true"
+    ? withPolicyApproval(adapter, dbPath, perPurchaseCapCents)
+    : adapter;
+}
+
+/**
+ * Autonomous approval rail. The creator's funded quest and its cap are the
+ * authorization; this records a one-use, 2-minute approval bounded by
+ * min(quest cap, per-purchase cap) just before the agent searches. The adapter
+ * still enforces allowlist, live reprice, daily/total caps and one purchase per
+ * claim, and the product spend guard still runs before any purchase.
+ */
+function withPolicyApproval(inner: BitrefillAdapter, dbPath: string, perPurchaseCapCents: number): BitrefillAdapter {
+  return {
+    async searchEligibleProducts(input) {
+      const ceiling = Math.min(input.maxPriceCents, perPurchaseCapCents);
+      if (Number.isSafeInteger(ceiling) && ceiling > 0) {
+        approveOnePurchase(dbPath, ceiling, Date.now() + 2 * 60_000);
+      }
+      return inner.searchEligibleProducts(input);
+    },
+    purchaseApprovedReward: (input) => inner.purchaseApprovedReward(input),
+    getOrderStatus: (invoiceId) => inner.getOrderStatus(invoiceId),
+  };
 }
 
 /** Selects provider implementations per provider. Defaults to mock. */
