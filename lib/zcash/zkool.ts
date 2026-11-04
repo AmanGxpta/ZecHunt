@@ -17,6 +17,27 @@ interface QuestAddress {
   address: string;
 }
 
+/**
+ * Read-only watcher status for operators and the creator page. Null means "not known
+ * right now", never a guess; `unavailable` says which part could not be read and why
+ * (safe to log: reason codes only).
+ */
+export interface ZkoolWatcherHealth {
+  /** Height this watch-only account has scanned to (zkool's sync_heights), or null. */
+  syncedHeight: number | null;
+  /** Latest block height reported by the light-wallet server through zkool, or null. */
+  chainTipHeight: number | null;
+  /** Epoch ms of the last findFunding scan (sync + transaction read) that completed. Survives restarts. */
+  lastSuccessfulScanAt: number | null;
+  unavailable: WatcherHealthGap[];
+}
+
+export type WatcherHealthGap =
+  | "chain_tip_unavailable"
+  | "synced_height_unavailable"
+  | "synced_height_unauthorized"
+  | "never_scanned";
+
 interface WalletTransaction {
   txid: string;
   height: number;
@@ -52,6 +73,11 @@ export class ZkoolZcashAdapter implements ZcashAdapter {
     this.db.exec(`CREATE TABLE IF NOT EXISTS zcash_quest_addresses (
       quest_id TEXT PRIMARY KEY,
       address TEXT NOT NULL UNIQUE
+    );
+    CREATE TABLE IF NOT EXISTS zcash_watcher_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      last_scan_at INTEGER NOT NULL,
+      last_synced_height INTEGER NOT NULL
     )`);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -145,6 +171,10 @@ export class ZkoolZcashAdapter implements ZcashAdapter {
       }
     }
 
+    this.db.prepare(`INSERT INTO zcash_watcher_state (id, last_scan_at, last_synced_height) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET last_scan_at = excluded.last_scan_at, last_synced_height = excluded.last_synced_height`)
+      .run(Date.now(), syncedHeight);
+
     // zkool's note ID is local to its wallet DB and changes in a fresh
     // watch-only wallet. Group by txid and quest address for stable dedupe.
     return [...byTransaction].map(([txid, amountZatoshis]) => ({
@@ -153,6 +183,44 @@ export class ZkoolZcashAdapter implements ZcashAdapter {
       amountZatoshis,
       confirmations: syncedHeight - heights.get(txid)! + 1,
     }));
+  }
+
+  /**
+   * Read-only: two GraphQL queries, no mutation, no synchronization, and never the
+   * account's seed or keys. The tip and the synced height are queried separately so one
+   * failing (e.g. light-wallet server down) does not hide the other. Never throws for
+   * provider failures.
+   */
+  async getWatcherHealth(): Promise<ZkoolWatcherHealth> {
+    const unavailable: WatcherHealthGap[] = [];
+    const [tip, account] = await Promise.allSettled([
+      this.query<{ currentHeight: number }>("query { currentHeight }", {}),
+      this.query<{ accounts: { id: number; height: number }[] }>(
+        "query($id: Int!) { accounts(accountFilter: { id: $id }) { id height } }",
+        { id: this.options.accountId },
+      ),
+    ]);
+    const positive = (v: unknown): number | null => Number.isSafeInteger(v) && (v as number) > 0 ? v as number : null;
+
+    const chainTipHeight = tip.status === "fulfilled" ? positive(tip.value.currentHeight) : null;
+    if (chainTipHeight === null) unavailable.push("chain_tip_unavailable");
+
+    let syncedHeight: number | null = null;
+    if (account.status === "fulfilled") {
+      const rows = (account.value.accounts ?? []).filter((a) => a.id === this.options.accountId);
+      syncedHeight = rows.length === 1 ? positive(rows[0].height) : null;
+    }
+    if (syncedHeight === null) {
+      // zkool's `accounts` query is admin-only; an account-scoped JWT gets "Unauthorized".
+      const unauthorized = account.status === "rejected" && /Unauthorized/.test(String(account.reason));
+      unavailable.push(unauthorized ? "synced_height_unauthorized" : "synced_height_unavailable");
+    }
+
+    const state = this.db.prepare("SELECT last_scan_at FROM zcash_watcher_state WHERE id = 1").get() as
+      { last_scan_at: number } | undefined;
+    const lastSuccessfulScanAt = state?.last_scan_at ?? null;
+    if (lastSuccessfulScanAt === null) unavailable.push("never_scanned");
+    return { syncedHeight, chainTipHeight, lastSuccessfulScanAt, unavailable };
   }
 
   private lookup(questId: string): QuestAddress | undefined {
