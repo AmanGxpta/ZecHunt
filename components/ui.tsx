@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { listManagedQuests } from "@/lib/client/creator-store";
 
 export function Shell({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
@@ -13,13 +14,23 @@ export function Shell({ children, wide = false }: { children: ReactNode; wide?: 
             zec<span className="text-lantern">Hunt</span>
           </span>
         </Link>
-        <span className="rounded-full border border-line px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-muted">
-          Testnet
+        <span className="flex items-center gap-3">
+          <MyQuestsLink />
+          <span className="rounded-full border border-line px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-muted">
+            Testnet
+          </span>
         </span>
       </header>
       {children}
     </div>
   );
+}
+
+/** Shown only in browsers that created (or opened the manage link of) a quest. */
+export function MyQuestsLink() {
+  const [show, setShow] = useState(false);
+  useEffect(() => { const has = listManagedQuests().length > 0; queueMicrotask(() => setShow(has)); }, []);
+  return show ? <Link href="/quests" className="text-sm text-muted hover:text-lantern">My quests</Link> : null;
 }
 
 export function Mark({ size = 26 }: { size?: number }) {

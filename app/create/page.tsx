@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, Card, CATEGORY_LABEL, ErrorNote, Eyebrow, Shell, Spinner } from "@/components/ui";
 import { saveSecrets } from "@/lib/client/creator-store";
 
@@ -16,6 +16,22 @@ export default function CreatePage() {
   const [cap, setCap] = useState(50);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [copiedFrom, setCopiedFrom] = useState<string | null>(null);
+
+  // "Run it again": prefill from an earlier quest (public fields only).
+  useEffect(() => {
+    const from = new URLSearchParams(window.location.search).get("from");
+    if (!from) return;
+    let alive = true;
+    fetch(`/api/quests/${encodeURIComponent(from)}`).then((r) => (r.ok ? r.json() : null)).then((d) => {
+      if (!alive || !d?.quest) return;
+      setTitle(d.quest.title); setClue(d.quest.clue);
+      if ((CATEGORIES as readonly string[]).includes(d.quest.rewardCategory)) setCategory(d.quest.rewardCategory);
+      if (CAPS.includes(d.quest.rewardCapInr)) setCap(d.quest.rewardCapInr);
+      setCopiedFrom(d.quest.title);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -45,7 +61,9 @@ export default function CreatePage() {
         <div className="rise">
           <Eyebrow>New quest</Eyebrow>
           <h1 className="mt-2 font-display text-4xl tracking-tight">Hide a reward</h1>
-          <p className="mt-2 text-muted">One checkpoint and one winner. Takes about a minute.</p>
+          <p className="mt-2 text-muted">
+            {copiedFrom ? `Copied from “${copiedFrom}”. Change anything, then publish. It gets a new code and funding address.` : "One checkpoint and one winner. Takes about a minute."}
+          </p>
         </div>
 
         <Card className="space-y-5">

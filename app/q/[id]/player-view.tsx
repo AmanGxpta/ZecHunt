@@ -6,7 +6,7 @@ import { Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr,
 type Mode = "mock" | "live";
 interface PublicQuest {
   id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number; rewardCapInr: number;
-  status: "awaiting_funding" | "active" | "exhausted"; winnersRemaining: number; zcashMode: Mode;
+  status: "awaiting_funding" | "active" | "paused" | "exhausted" | "cancelled"; winnersRemaining: number; zcashMode: Mode;
 }
 interface ClaimView {
   claimId: string; claimStatus: string; reason?: string;
@@ -18,6 +18,8 @@ const ERRORS: Record<string, string> = {
   too_many_attempts: "Too many wrong tries. Take a breather and try again in a few minutes.",
   quest_exhausted: "Someone got there first. This reward has been claimed.",
   quest_not_active: "This quest isn’t live yet.",
+  quest_paused: "The organiser paused this quest for a moment. Try again shortly.",
+  quest_cancelled: "This quest was cancelled by the organiser.",
   already_claimed: "You’ve already claimed this quest.",
   invalid_token: "Your claim expired. Enter the current code again.",
 };
@@ -91,7 +93,7 @@ export default function PlayerView({ id }: { id: string }) {
   return (
     <Shell>
       <div className="rise">
-        <Eyebrow>{claim ? "You won this quest" : quest.status === "active" ? "Quest is live" : quest.status === "exhausted" ? "Quest complete" : "Not live yet"}</Eyebrow>
+        <Eyebrow>{claim ? "You won this quest" : ({ active: "Quest is live", paused: "Paused", exhausted: "Quest complete", cancelled: "Cancelled", awaiting_funding: "Not live yet" } as const)[quest.status]}</Eyebrow>
         <h1 className="mt-2 font-display text-4xl leading-tight tracking-tight">{quest.title}</h1>
         <p className="mt-2 text-muted">
           Reward: {quest.rewardCategory === "any" ? "a voucher of the winner’s choice" : CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatInr(quest.rewardCapInr)}
@@ -122,6 +124,16 @@ export default function PlayerView({ id }: { id: string }) {
             </Button>
           </Card>
         </form>
+      ) : quest.status === "paused" ? (
+        <Card className="mt-4 text-center">
+          <p className="font-display text-xl">Paused by the organiser</p>
+          <p className="mt-2 text-sm text-muted">The hunt will be back soon. This page updates on its own.</p>
+        </Card>
+      ) : quest.status === "cancelled" ? (
+        <Card className="mt-4 text-center">
+          <p className="font-display text-xl">This quest was cancelled</p>
+          <p className="mt-2 text-sm text-muted">The organiser called it off before anyone won.</p>
+        </Card>
       ) : quest.status === "exhausted" ? (
         <Card className="mt-4 text-center">
           <p className="font-display text-2xl">Someone got there first</p>
