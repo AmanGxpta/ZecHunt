@@ -487,6 +487,7 @@ export type ClaimOutcome = {
   claimId: string;
   claimStatus: string;
   purchase: {
+    productId: string;
     productName: string;
     priceCents: number;
     /** Approximate, for display only. */
@@ -625,6 +626,7 @@ function loadOutcome(db: DatabaseSync, claimId: string, reason?: string): ClaimO
     claimStatus: claim.status,
     purchase: attempt
       ? {
+          productId: attempt.product_id,
           productName: attempt.product_name,
           priceCents: attempt.quoted_cents,
           priceInr: centsToInr(attempt.quoted_cents),

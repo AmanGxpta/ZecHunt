@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { DomainError } from "../errors";
 import { ANY_CATALOG_PRODUCT, approveOnePurchase } from "../bitrefill/adapter";
 import { CatalogBitrefillBridge } from "../bitrefill/bridge";
+import { findByCatalogKey } from "../bitrefill/catalog";
+import { catalogLogoUrl } from "../bitrefill/logos";
 import { ZkoolZcashAdapter } from "../zcash/zkool";
 import { MockBitrefillAdapter, MockZcashAdapter } from "./mock";
 import { PurchaseRejectedError, type BitrefillAdapter, type Providers, type ZcashAdapter } from "./types";
@@ -71,6 +73,7 @@ function liveBitrefill(): BitrefillAdapter {
     },
     getOrderStatus: (invoiceId) => bridge.getOrderStatus(invoiceId),
     reconcilePurchase: (claimId) => bridge.reconcilePurchase(claimId),
+    productLogo: (productId) => catalogLogoUrl(findByCatalogKey(productId)?.productId ?? productId.split(":")[0]),
   };
   return process.env.ZECHUNT_BITREFILL_AUTO_APPROVE === "true"
     ? withPolicyApproval(live, dbPath, perPurchaseCapCents)
@@ -105,6 +108,7 @@ function withPolicyApproval(inner: BitrefillAdapter, dbPath: string, perPurchase
     },
     getOrderStatus: (invoiceId) => inner.getOrderStatus(invoiceId),
     reconcilePurchase: inner.reconcilePurchase && ((claimId) => inner.reconcilePurchase!(claimId)),
+    productLogo: inner.productLogo && ((productId) => inner.productLogo!(productId)),
   };
 }
 

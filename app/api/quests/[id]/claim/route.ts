@@ -36,13 +36,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const status = getClaimStatus(db, id, session.id);
     if (!status) return withPlayerCookie(NextResponse.json({ claim: null }), session);
 
+    const { bitrefill } = getProviders();
     let redemptionData: string | undefined;
     if (status.claimStatus === "delivered" && status.purchase?.invoiceId) {
-      const order = await getProviders().bitrefill.getOrderStatus(status.purchase.invoiceId);
+      const order = await bitrefill.getOrderStatus(status.purchase.invoiceId);
       redemptionData = order.redemptionData;
     }
+    const logoUrl = status.purchase ? bitrefill.productLogo?.(status.purchase.productId) ?? null : null;
     return withPlayerCookie(
-      NextResponse.json({ claim: status, redemptionData }, { headers: { "cache-control": "no-store" } }),
+      NextResponse.json({ claim: status, redemptionData, logoUrl }, { headers: { "cache-control": "no-store" } }),
       session,
     );
   } catch (err) {

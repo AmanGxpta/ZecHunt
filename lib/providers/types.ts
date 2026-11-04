@@ -70,6 +70,8 @@ export interface BitrefillAdapter {
    * MUST NOT buy. Throws when it cannot match exactly one invoice.
    */
   reconcilePurchase?(claimId: string): Promise<{ invoiceId: string; status: string }>;
+  /** Optional. Brand logo for a product id this adapter returned (https, provider image host). */
+  productLogo?(productId: string): string | undefined;
 }
 
 export interface Providers {
