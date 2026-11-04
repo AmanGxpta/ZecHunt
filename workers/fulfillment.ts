@@ -6,6 +6,6 @@ import { getProviders } from "../lib/providers";
 import { reconcileFulfillments } from "../lib/quests/service";
 
 export async function fulfillmentTick(log = console.log): Promise<void> {
-  const { flagged, refreshed } = await reconcileFulfillments(getDb(), getProviders().bitrefill);
-  if (flagged || refreshed) log(`[fulfillment] flagged ${flagged}, refreshed ${refreshed}`);
+  const { flagged, refreshed, adopted } = await reconcileFulfillments(getDb(), getProviders().bitrefill);
+  if (flagged || refreshed || adopted) log(`[fulfillment] flagged ${flagged}, adopted ${adopted}, refreshed ${refreshed}`);
 }

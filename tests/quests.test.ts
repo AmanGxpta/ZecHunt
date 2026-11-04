@@ -353,3 +353,34 @@ test("rupee caps convert to a USD-cent guard limit with margin; ₹50 can buy a 
   assert.equal(outcome.purchase?.priceCents, 55);
   assert.equal(outcome.purchase?.priceInr, 48);
 });
+
+test("an uncertain purchase is adopted from the provider's invoice history, never re-bought", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx);
+  let buys = 0;
+  let reconciles = 0;
+  const flaky: BitrefillAdapter = {
+    searchEligibleProducts: (input) => ctx.bitrefill.searchEligibleProducts(input),
+    async purchaseApprovedReward() { buys++; throw new Error("reply unreadable"); },
+    getOrderStatus: async () => ({ status: "delivered", redemptionData: "SECRET" }),
+    async reconcilePurchase(claimId) { reconciles++; return { invoiceId: `inv-${claimId}`, status: "complete" }; },
+  };
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
+  const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
+  assert.ok("claimId" in r);
+  const first = await fulfillClaim(ctx.db, flaky, r.claimId);
+  assert.equal(first.claimStatus, "needs_reconciliation");
+
+  const summary = await reconcileFulfillments(ctx.db, flaky);
+  assert.equal(summary.adopted, 1);
+  assert.equal(buys, 1, "reconciliation must never buy again");
+  assert.equal(reconciles, 1);
+  const after = getClaimStatus(ctx.db, created.questId, "alice");
+  assert.equal(after?.claimStatus, "delivered");
+  assert.equal(after?.purchase?.invoiceId, `inv-${r.claimId}`);
+
+  // A second pass changes nothing.
+  const again = await reconcileFulfillments(ctx.db, flaky);
+  assert.equal(again.adopted, 0);
+  assert.equal(reconciles, 1);
+});

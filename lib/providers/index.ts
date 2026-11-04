@@ -54,9 +54,15 @@ function liveBitrefill(): BitrefillAdapter {
     dailyCapCents: Number(process.env.BITREFILL_DAILY_CAP_CENTS ?? 55),
     totalCapCents: Math.min(capCents, Number(process.env.BITREFILL_TOTAL_CAP_CENTS ?? 55)),
   });
+  const live: BitrefillAdapter = {
+    searchEligibleProducts: (input) => adapter.searchEligibleProducts(input),
+    purchaseApprovedReward: (input) => adapter.purchaseApprovedReward(input),
+    getOrderStatus: (invoiceId) => adapter.getOrderStatus(invoiceId),
+    reconcilePurchase: (claimId) => adapter.reconcileReservedPurchase(claimId),
+  };
   return process.env.ZECHUNT_BITREFILL_AUTO_APPROVE === "true"
-    ? withPolicyApproval(adapter, dbPath, perPurchaseCapCents)
-    : adapter;
+    ? withPolicyApproval(live, dbPath, perPurchaseCapCents)
+    : live;
 }
 
 /**
@@ -77,6 +83,7 @@ function withPolicyApproval(inner: BitrefillAdapter, dbPath: string, perPurchase
     },
     purchaseApprovedReward: (input) => inner.purchaseApprovedReward(input),
     getOrderStatus: (invoiceId) => inner.getOrderStatus(invoiceId),
+    reconcilePurchase: inner.reconcilePurchase && ((claimId) => inner.reconcilePurchase!(claimId)),
   };
 }
 

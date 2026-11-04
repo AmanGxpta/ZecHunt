@@ -48,6 +48,11 @@ export interface BitrefillAdapter {
     expectedMaxPriceCents: number;
   }): Promise<{ invoiceId: string; status: string }>;
   getOrderStatus(invoiceId: string): Promise<PurchaseOrderStatus>;
+  /**
+   * Optional. Finds the provider invoice for a purchase whose outcome was uncertain.
+   * MUST NOT buy. Throws when it cannot match exactly one invoice.
+   */
+  reconcilePurchase?(claimId: string): Promise<{ invoiceId: string; status: string }>;
 }
 
 export interface Providers {

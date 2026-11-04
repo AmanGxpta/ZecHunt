@@ -37,6 +37,9 @@ How the app uses the adapter:
 Set `ZECHUNT_BITREFILL_MODE=live` + `BITREFILL_API_KEY`. Purchases stay dry-run unless `ZECHUNT_LIVE_PURCHASES=true` **and** a human approval is recorded ≤15 min before the claim.
 Note: in dry-run, a winning claim ends in `needs_reconciliation`, and the quest is used up. Use a throwaway quest for dry runs.
 
+Uncertain purchases (`NEEDS_RECONCILIATION`, no invoice) are retried **only** through the optional contract method `reconcilePurchase(claimId)`, which the live adapter implements with `reconcileReservedPurchase`. It reads `list-invoices` and adopts exactly one matching paid invoice. It never calls `buy-products`. The worker runs it on each tick and then confirms delivery as usual.
+Verified read-only on 4 Nov against the real first purchase: it found invoice `3923a98e…` from a replayed RESERVED state.
+
 ## Bitrefill: original contract
 
 Create `lib/bitrefill/index.ts` exporting:

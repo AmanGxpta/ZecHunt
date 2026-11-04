@@ -616,16 +616,43 @@ export async function reconcileFulfillments(
   db: DatabaseSync,
   bitrefill: BitrefillAdapter,
   { graceMs = 60_000, now = Date.now() } = {},
-): Promise<{ flagged: number; refreshed: number }> {
+): Promise<{ flagged: number; refreshed: number; adopted: number }> {
   // Grace period: never touch an attempt that may still be inside its purchase call.
   const pending = db
     .prepare("SELECT claim_id FROM purchase_attempts WHERE state = 'PURCHASE_PENDING' AND updated_at < ?")
     .all(now - graceMs) as { claim_id: string }[];
   for (const row of pending) markNeedsReconciliation(db, row.claim_id, "interrupted_before_invoice");
 
+  // Uncertain purchases: ask the provider to find the invoice. This never buys.
+  let adopted = 0;
+  if (bitrefill.reconcilePurchase) {
+    const frozen = db
+      .prepare("SELECT claim_id FROM purchase_attempts WHERE state = 'NEEDS_RECONCILIATION' AND invoice_id IS NULL")
+      .all() as { claim_id: string }[];
+    for (const row of frozen) {
+      try {
+        const found = await bitrefill.reconcilePurchase(row.claim_id);
+        adopted += tx(db, () => {
+          const t = Date.now();
+          const changed = db
+            .prepare(
+              `UPDATE purchase_attempts SET state = 'INVOICE_CREATED', invoice_id = ?, updated_at = ?
+               WHERE claim_id = ? AND state = 'NEEDS_RECONCILIATION' AND invoice_id IS NULL`,
+            )
+            .run(found.invoiceId, t, row.claim_id);
+          if (Number(changed.changes) !== 1) return 0;
+          db.prepare("UPDATE claims SET status = 'purchase_pending', failure_reason = NULL, updated_at = ? WHERE id = ?").run(t, row.claim_id);
+          return 1;
+        });
+      } catch (err) {
+        console.error(`[fulfillment] claim ${row.claim_id} still uncertain:`, err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
+
   const open = db.prepare("SELECT claim_id FROM purchase_attempts WHERE state = 'INVOICE_CREATED'").all() as { claim_id: string }[];
   for (const row of open) await refreshOrderStatus(db, bitrefill, row.claim_id);
-  return { flagged: pending.length, refreshed: open.length };
+  return { flagged: pending.length, refreshed: open.length, adopted };
 }
 
 export function getClaimStatus(db: DatabaseSync, questId: string, playerSession: string): ClaimOutcome | null {
