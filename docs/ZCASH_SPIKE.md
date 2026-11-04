@@ -1,6 +1,6 @@
 # zechunt Zcash capability spike
 
-Status: **live shielded funding detection passed**. Application quest activation is still an integration step and has not been claimed here.
+Status: **live shielded funding and application quest activation passed** in an isolated smoke database. The full player-to-Bitrefill flow is still pending.
 
 The first build attempt stopped while fetching zkool2's Nym Git dependency: the machine had only about 212 MiB free and Cargo reported `No space left on device`. After space became available, `cargo build --release --no-default-features --features graphql --bin zkool_graphql` succeeded in five minutes. The binary was built outside the repository.
 
@@ -17,9 +17,8 @@ A creator funds a quest with testnet TAZ. A server process holding only a viewin
 
 ## Open proof steps
 
-1. Integrate `lib/zcash/zkool.ts` into the product's provider selector and run a real quest from `awaiting_funding` to `active`.
-2. Verify that the application database counts the same funding event only once across repeated syncs.
-3. Replace the localhost demo server with an authenticated or isolated watch-only wallet service for any deployment.
+1. Replace the localhost demo server with an authenticated or isolated watch-only wallet service for any deployment.
+2. Run the human creator/player flow through the browser after the product integration is complete.
 
 Run the read-only probe with `ZECHUNT_ZKOOL_ACCOUNT_ID=<id> node scripts/zcash-probe.mjs`. It reports the Ironwood address and confirmed incoming notes; it does not synchronize or spend. Set `ZECHUNT_ZKOOL_GRAPHQL_URL` if the GraphQL endpoint differs from `http://127.0.0.1:8000/graphql`.
 
@@ -43,7 +42,8 @@ Use the watch-only account, not the spending demo account. Keep `ZECHUNT_ZCASH_M
 - Dedicated demo account A received 1 TAZ from Fauzec in [transaction `4ea9e231…e3dc9b`](https://zexplorer.app/testnet/tx/4ea9e23142e79eef1527f3cef654d8f25b2a0c6f232395badb916853c9e3dc9b), confirmed at height 4,582,034. The wallet independently decrypted an incoming Ironwood (`pool: 3`, `scope: 0`) note for 100,000,000 zatoshis.
 - Demo account A sent 0.01 TAZ to demo account B in [transaction `38c44579…c4e47`](https://zexplorer.app/testnet/tx/38c445797e97076befaed7adc31f3eb568c84d515ea73546ac545cecbf0c4e47). Account B decrypted the incoming 1,000,000-zatoshi Ironwood note and memo `ZECHUNT-DEMO-1` at height 4,582,043.
 - Account B's Ironwood-only UFVK was imported into a separate encrypted wallet database with birthday 4,582,030. That watch-only account independently decrypted the same note. Attempting `pay` there returned `No Signing Key`.
-- The live adapter allocated a fresh quest address from the watch-only account, then detected a 0.01 TAZ deposit to that exact address in [transaction `800e91d9…1546d`](https://zexplorer.app/testnet/tx/800e91d9394467ac3483d57b60e00c7547fbe2b3c10a0b7db1d11afd95f1546d) at one confirmation. A repeat scan returned the same `outputId` and a higher confirmation count. This proves the adapter path through `getQuestAddress` and `findFunding`; it does not yet prove the Next.js quest state transition.
+- The live adapter allocated a fresh quest address from the watch-only account, then detected a 0.01 TAZ deposit to that exact address in [transaction `800e91d9…1546d`](https://zexplorer.app/testnet/tx/800e91d9394467ac3483d57b60e00c7547fbe2b3c10a0b7db1d11afd95f1546d) at one confirmation. A repeat scan returned the same `outputId` and a higher confirmation count. This proves the adapter path through `getQuestAddress` and `findFunding`.
+- In a separate `/tmp` application SQLite database, the current product service created quest `9YaZt1YgsT6z` in `awaiting_funding`. Demo account A paid its adapter-allocated address 0.01 TAZ in [transaction `5ebb0957…725770`](https://zexplorer.app/testnet/tx/5ebb0957b12c7c6ce2ca05223dc924d96b7de3bd3ad68e6817f7c3676e725770). `syncQuestFunding` then returned `active`, `fundedZatoshis: 1000000`, and one persisted funding event. Repeating the sync left the total and event count unchanged. No product-worktree file was edited for this check.
 - The demo wallet databases and password files are under `/tmp/zechunt-*` with passwords stored in mode-0600 files. No seed, spending key, or viewing key was printed or committed.
 
 For local product integration during this session, the watch-only GraphQL service is on `http://127.0.0.1:8766/graphql` with account ID `1`; the quest mapping SQLite file is `/tmp/zechunt-quest-map.db`. Set `ZECHUNT_ZCASH_MODE=live`, `ZECHUNT_ZKOOL_GRAPHQL_URL` to that URL, `ZECHUNT_ZKOOL_ACCOUNT_ID=1`, and `ZECHUNT_ZCASH_MAPPING_DB` to that path. The spending demo service has been stopped. These local `/tmp` artifacts are disposable and are not deployment configuration.
