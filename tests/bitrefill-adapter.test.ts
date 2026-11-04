@@ -18,21 +18,27 @@ test("a one-use approval permits one purchase and duplicate claims reuse its inv
   const fakeFetch: typeof fetch = async (url, init) => {
     const path = new URL(String(url)).pathname;
     let data: unknown;
-    if (path.endsWith("/products/swiggy-money-india")) {
-      data = { id: "swiggy-money-india", name: "Swiggy Money India", country_code: "IN",
-        in_stock: true, recipient_type: "none", packages: [
-          { value: "50", price: "0.55", payment_currency: "USD" },
-        ] };
-    } else if (path.endsWith("/accounts/balance")) {
-      data = { balance: 25, currency: "USD" };
-    } else if (path.endsWith("/invoices") && init?.method === "POST") {
-      posts++;
-      const body = JSON.parse(String(init.body));
-      assert.deepEqual(body, {
-        products: [{ product_id: "swiggy-money-india", quantity: 1, value: 50 }],
-        payment_method: "balance", auto_pay: true,
-      });
-      data = { id: "invoice-1234", status: "pending" };
+    if (path.endsWith("/mcp")) {
+      const request = JSON.parse(String(init?.body));
+      assert.equal(request.method, "tools/call");
+      const tool = request.params;
+      if (tool.name === "get-product-details") {
+        assert.deepEqual(tool.arguments, { product_id: "swiggy-money-india", currency: "USD" });
+        data = { id: "swiggy-money-india", name: "Swiggy Money India", country_code: "IN",
+          in_stock: true, recipient_type: "none", packages: [
+            { package_value: "50", payment_price: "0.55", payment_currency: "USD" },
+          ] };
+      } else if (tool.name === "buy-products") {
+        posts++;
+        assert.deepEqual(tool.arguments, {
+          cart_items: [{ product_id: "swiggy-money-india", package_value: "50" }],
+          payment_method: "balance", balance_currency: "USD",
+        });
+        data = { invoice_id: "invoice-1234", status: "pending" };
+      } else throw new Error(`Unexpected tool: ${tool.name}`);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify(data) }] } }),
+      { headers: { "content-type": "application/json" } });
     } else if (path.endsWith("/invoices/invoice-1234")) {
       data = { id: "invoice-1234", status: "complete", orders: [{ id: "order-1234", status: "delivered" }] };
     } else if (path.endsWith("/orders/order-1234")) {
@@ -69,16 +75,15 @@ test("a one-use approval permits one purchase and duplicate claims reuse its inv
 test("a failed invoice call leaves an uncertain reservation and is never retried", async () => {
   let posts = 0;
   const fakeFetch: typeof fetch = async (url, init) => {
-    if (String(url).endsWith("/products/swiggy-money-india")) {
-      return new Response(JSON.stringify({ data: {
-        id: "swiggy-money-india", country_code: "IN", in_stock: true, recipient_type: "none",
-        packages: [{ value: 50, price: "0.55" }],
-      } }));
+    if (String(url).endsWith("/mcp")) {
+      const tool = JSON.parse(String(init?.body)).params.name;
+      if (tool === "get-product-details") return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify({
+          id: "swiggy-money-india", country_code: "IN", in_stock: true, recipient_type: "none",
+          packages: [{ package_value: "50", payment_price: "0.55", payment_currency: "USD" }],
+        }) }] } }));
+      if (tool === "buy-products") { posts++; throw new Error("network outcome unknown"); }
     }
-    if (String(url).endsWith("/accounts/balance")) {
-      return new Response(JSON.stringify({ data: { balance: 25, currency: "USD" } }));
-    }
-    if (init?.method === "POST") { posts++; throw new Error("network outcome unknown"); }
     throw new Error("Unexpected request");
   };
   const dir = mkdtempSync(join(tmpdir(), "zechunt-bitrefill-test-"));
