@@ -3,34 +3,46 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { decode as decodeToon } from "@toon-format/toon";
 import { usdToCents } from "./adapter";
+import { displayTitle, REWARD_CATALOG, sanitizeProviderText, type CatalogEntry } from "./catalog";
 import type {
-  BitrefillAdapterV2, OrderStatus, OrderSummary, PurchaseRequest, PurchaseResult,
+  BitrefillAdapterV2, CompetingAttempt, Money, OrderStatus, OrderSummary, PurchaseRequest, PurchaseResult,
   ReconcileRequest, ReconciliationResult, Redemption, RewardCandidate,
 } from "../providers/v2";
 
-interface AllowedProduct {
-  productId: string;
-  packageValue: string;
-  category: string;
-  country: string;
-  faceCurrency: "INR" | "USD";
-}
+type AllowedProduct = CatalogEntry;
 
-const DEFAULT_ALLOWLIST: AllowedProduct[] = [{
-  productId: "swiggy-money-india", packageValue: "50", category: "food", country: "IN", faceCurrency: "INR",
-}];
-
-interface Options {
+export interface McpBitrefillAdapterV2Options {
   apiKey: string;
+  /** SQLite file for the adapter's own attempt ledger. Ignored when `database` is given. */
   dbPath: string;
+  /** Share an existing connection (the v1 bridge passes its own so both ledgers are one file). */
+  database?: DatabaseSync;
+  /**
+   * Also count the v1 `bitrefill_attempts` ledger (same database) toward the daily and
+   * total caps, and treat a v1 row for the same claim as a duplicate. Required whenever
+   * v1 purchases exist in this database, or the caps would restart from zero.
+   */
+  legacyV1Ledger?: boolean;
   livePurchases?: boolean;
   perPurchaseCapCents?: number;
   dailyCapCents?: number;
   totalCapCents?: number;
   mcpUrl?: string;
   fetchImpl?: typeof fetch;
-  /** A server-owned hard allowlist. Catalog text cannot add purchasable products. */
-  allowlist?: AllowedProduct[];
+  /** A server-owned hard allowlist. Defaults to REWARD_CATALOG. Catalog text cannot add products. */
+  allowlist?: readonly AllowedProduct[];
+}
+
+/** Read-only view of one attempt in the adapter ledger (no secrets). */
+export interface LedgerAttempt {
+  attemptId: string;
+  claimId: string;
+  productId: string;
+  packageValue: string;
+  quotedCents: number;
+  state: AttemptState;
+  invoiceId: string | null;
+  createdAt: number;
 }
 
 interface ProductDetail {
@@ -39,7 +51,10 @@ interface ProductDetail {
   country_code?: string;
   in_stock?: boolean;
   recipient_type?: string;
-  packages?: Array<{ value?: string | number; package_value?: string; payment_price?: string; payment_currency?: string }>;
+  packages?: Array<{
+    value?: string | number; package_value?: string; package_currency?: string;
+    payment_price?: string; payment_currency?: string;
+  }>;
 }
 
 interface ListedInvoice {
@@ -71,6 +86,7 @@ interface AttemptRow {
   quoted_cents: number;
   state: string;
   invoice_id: string | null;
+  created_at: number;
 }
 
 interface BalanceEntry {
@@ -94,14 +110,21 @@ class McpError extends Error {
 export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
   readonly mode = "live" as const;
   private readonly db: DatabaseSync;
+  private readonly ownsDb: boolean;
   private readonly fetchImpl: typeof fetch;
   private readonly mcpUrl: string;
-  private readonly allowlist: AllowedProduct[];
+  private readonly allowlist: readonly AllowedProduct[];
 
-  constructor(private readonly options: Options) {
+  constructor(private readonly options: McpBitrefillAdapterV2Options) {
     if (!options.apiKey) throw new Error("Bitrefill API key is required");
-    if (options.dbPath !== ":memory:") mkdirSync(dirname(options.dbPath), { recursive: true });
-    this.db = new DatabaseSync(options.dbPath);
+    if (options.database) {
+      this.db = options.database;
+      this.ownsDb = false;
+    } else {
+      if (options.dbPath !== ":memory:") mkdirSync(dirname(options.dbPath), { recursive: true });
+      this.db = new DatabaseSync(options.dbPath);
+      this.ownsDb = true;
+    }
     this.db.exec("PRAGMA busy_timeout = 30000");
     this.db.exec(`CREATE TABLE IF NOT EXISTS bitrefill_v2_attempts (
       attempt_id TEXT PRIMARY KEY,
@@ -116,43 +139,33 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     )`);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.mcpUrl = options.mcpUrl ?? "https://api.bitrefill.com/mcp";
-    this.allowlist = options.allowlist ?? DEFAULT_ALLOWLIST;
+    this.allowlist = options.allowlist ?? REWARD_CATALOG;
   }
 
-  close(): void { this.db.close(); }
+  close(): void { if (this.ownsDb) this.db.close(); }
 
   async searchEligibleProducts(input: { country: string; category: string; maxSpendUsdCents: number }): Promise<RewardCandidate[]> {
-    const result: RewardCandidate[] = [];
-    for (const allowed of this.allowlist) {
-      if (allowed.country !== input.country || allowed.category !== input.category) continue;
-      const quote = await this.getLiveQuote(allowed);
-      if (quote.available && !quote.requiresRecipientInput &&
-          quote.quotedPrice.amountMinor <= input.maxSpendUsdCents &&
-          quote.quotedPrice.amountMinor <= (this.options.perPurchaseCapCents ?? 55)) result.push(quote);
-    }
-    return result;
+    const entries = this.allowlist.filter((x) => x.country === input.country && x.category === input.category);
+    // One product-details call per brand, in parallel; a failing brand is skipped, not fatal.
+    const ids = [...new Set(entries.map((x) => x.productId))];
+    const details = new Map<string, ProductDetail>();
+    await Promise.all(ids.map(async (id) => {
+      try { details.set(id, await this.productDetail(id)); } catch { /* Brand unavailable right now. */ }
+    }));
+    const cap = this.options.perPurchaseCapCents ?? 55;
+    return entries.flatMap((entry) => {
+      const detail = details.get(entry.productId);
+      if (!detail) return [];
+      const quote = quoteFrom(entry, detail);
+      return quote.available && !quote.requiresRecipientInput && quote.quotedPrice.amountMinor <= input.maxSpendUsdCents &&
+        quote.quotedPrice.amountMinor <= cap ? [quote] : [];
+    }).sort((a, b) => a.quotedPrice.amountMinor - b.quotedPrice.amountMinor || a.title.localeCompare(b.title));
   }
 
   async getLiveQuote(input: { productId: string; packageValue: string }): Promise<RewardCandidate> {
     const allowed = this.allowlist.find((x) => x.productId === input.productId && x.packageValue === input.packageValue);
     if (!allowed) return unavailableQuote(input.productId, input.packageValue);
-    const detail = await this.mcpTool<ProductDetail>("get-product-details", { product_id: allowed.productId, currency: "USD" });
-    const pack = detail.packages?.find((x) => String(x.value ?? x.package_value) === allowed.packageValue);
-    const recipient = detail.recipient_type !== "none";
-    const valid = detail.id === allowed.productId && detail.country_code === allowed.country &&
-      detail.in_stock === true && !!pack && pack.payment_currency === "USD";
-    let cents = 0;
-    if (valid) {
-      try { cents = usdToCents(pack.payment_price ?? ""); } catch { /* Untrusted quote: unavailable. */ }
-    }
-    const face = Number(allowed.packageValue);
-    return {
-      productId: allowed.productId, packageValue: allowed.packageValue,
-      title: detail.name ?? allowed.productId, category: allowed.category, country: allowed.country,
-      quotedPrice: { amountMinor: cents, currency: "USD" },
-      faceValue: Number.isSafeInteger(face) && face > 0 ? { amountMinor: face * 100, currency: allowed.faceCurrency } : undefined,
-      requiresRecipientInput: recipient, available: valid && cents > 0,
-    };
+    return quoteFrom(allowed, await this.productDetail(allowed.productId));
   }
 
   async purchaseApprovedReward(req: PurchaseRequest): Promise<PurchaseResult> {
@@ -197,20 +210,14 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     try {
       if (this.getAttempt(req.attemptId) || this.db.prepare(
         "SELECT 1 FROM bitrefill_v2_attempts WHERE claim_id = ? OR approval_id = ?",
-      ).get(req.claimId, req.approval.approvalId)) {
+      ).get(req.claimId, req.approval.approvalId) || (this.options.legacyV1Ledger && this.hasV1Ledger() &&
+        this.db.prepare("SELECT 1 FROM bitrefill_attempts WHERE claim_id = ?").get(req.claimId))) {
         this.db.exec("ROLLBACK");
         return reject("duplicate_attempt");
       }
-      // Every attempt that may have charged counts, including uncertain ones. Only a
-      // provably refused attempt is excluded.
-      const all = this.db.prepare(
-        "SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED'",
-      ).get() as { cents: number };
-      const today = this.db.prepare(
-        "SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED' AND created_at >= ?",
-      ).get(new Date().setUTCHours(0, 0, 0, 0)) as { cents: number };
-      if (all.cents + cents > (this.options.totalCapCents ?? 500) ||
-          today.cents + cents > (this.options.dailyCapCents ?? 500)) {
+      const spent = this.spentCents();
+      if (spent.all + cents > (this.options.totalCapCents ?? 500) ||
+          spent.today + cents > (this.options.dailyCapCents ?? 500)) {
         this.db.exec("ROLLBACK");
         return reject("spend_ceiling_reached");
       }
@@ -284,7 +291,7 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     const candidates = listing.invoices.filter((i) => i.invoice_id && !req.excludeInvoiceIds.includes(i.invoice_id) &&
       i.created_time && Number.isFinite(Date.parse(i.created_time)) && Date.parse(i.created_time) >= req.startedAt &&
       i.orders?.length === 1 && i.orders[0].product_id === req.productId &&
-      i.orders[0].value === req.packageValue && i.orders[0].currency === allowed.faceCurrency);
+      i.orders[0].value === req.packageValue && i.orders[0].currency === allowed.faceValue.currency);
     const matches: Array<{ id: string; status: OrderStatus; createdAt: number }> = [];
     for (const candidate of candidates) {
       let detail: InvoiceDetail;
@@ -305,7 +312,7 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
       try { paidCents = usdToCents(payment.price); }
       catch { return { kind: "unavailable", reasonCode: "invoice_price_unreadable" }; }
       if (order.product.id === req.productId && order.product.value === req.packageValue &&
-          order.product.currency === allowed.faceCurrency && order.payment_method === "balance" &&
+          order.product.currency === allowed.faceValue.currency && order.payment_method === "balance" &&
           payment.method === "balance" && payment.currency === "USD" && payment.status === "complete" &&
           paidCents === req.quotedPrice.amountMinor) {
         matches.push({ id: candidate.invoice_id!, status: invoiceStatus(detail), createdAt: Date.parse(detail.created_time) });
@@ -374,13 +381,81 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
   async getRedemption(invoiceId: string): Promise<Redemption | null> {
     const detail = await this.invoice(invoiceId);
     if (invoiceStatus(detail) !== "delivered" || detail.orders?.length !== 1) return null;
-    const info = detail.orders[0].redemption_info;
-    if (info == null) return null;
-    return { display: typeof info === "string" ? info : JSON.stringify(info) };
+    const display = formatRedemption(detail.orders[0].redemption_info);
+    return display ? { display } : null;
+  }
+
+  // ───────────── ledger helpers for the v1 bridge (not part of the v2 contract) ─────────────
+
+  getLedgerAttempt(attemptId: string): LedgerAttempt | undefined {
+    const row = this.getAttempt(attemptId);
+    return row && toLedger(row);
+  }
+
+  /**
+   * Cents still spendable under the daily and total caps (uncertain attempts count; only
+   * provably refused ones don't). Read-only; the purchase path re-checks inside its
+   * transaction.
+   */
+  remainingBudgetCents(): number {
+    const { all, today } = this.spentCents();
+    return Math.max(0, Math.min((this.options.totalCapCents ?? 500) - all, (this.options.dailyCapCents ?? 500) - today));
+  }
+
+  /**
+   * Reconcile one ledger attempt using only ledger evidence: every invoice already linked
+   * (v2 and, with legacyV1Ledger, v1) is excluded, and every other unresolved attempt is
+   * passed as a competing attempt (CR-1). For callers with no app-side ledger of their own,
+   * i.e. the v1 bridge. Read-only at the provider.
+   */
+  async reconcileFromLedger(attemptId: string): Promise<ReconciliationResult> {
+    const row = this.getAttempt(attemptId);
+    if (!row) return { kind: "unavailable", reasonCode: "unknown_attempt" };
+    const others = (this.db.prepare(`SELECT * FROM bitrefill_v2_attempts
+      WHERE attempt_id <> ? AND invoice_id IS NULL AND state <> 'REFUSED'`).all(attemptId) as unknown as AttemptRow[])
+      .map((r): CompetingAttempt => ({ attemptId: r.attempt_id, productId: r.product_id, packageValue: r.package_value,
+        quotedPrice: { amountMinor: r.quoted_cents, currency: "USD" }, startedAt: r.created_at }));
+    const linked = (this.db.prepare("SELECT invoice_id FROM bitrefill_v2_attempts WHERE invoice_id IS NOT NULL AND attempt_id <> ?")
+      .all(attemptId) as Array<{ invoice_id: string }>).map((r) => r.invoice_id);
+    if (this.options.legacyV1Ledger && this.hasV1Ledger()) {
+      for (const r of this.db.prepare("SELECT claim_id, reward_id, quoted_cents, invoice_id, created_at FROM bitrefill_attempts")
+        .all() as Array<{ claim_id: string; reward_id: string; quoted_cents: number; invoice_id: string | null; created_at: number }>) {
+        if (r.invoice_id) { linked.push(r.invoice_id); continue; }
+        const sep = r.reward_id.lastIndexOf(":");
+        others.push({ attemptId: `v1:${r.claim_id}`, productId: r.reward_id.slice(0, sep), packageValue: r.reward_id.slice(sep + 1),
+          quotedPrice: { amountMinor: r.quoted_cents, currency: "USD" }, startedAt: r.created_at });
+      }
+    }
+    return this.reconcileAttempt({
+      attemptId, claimId: row.claim_id, productId: row.product_id, packageValue: row.package_value,
+      quotedPrice: { amountMinor: row.quoted_cents, currency: "USD" }, startedAt: row.created_at,
+      excludeInvoiceIds: linked, competingAttempts: others,
+    });
   }
 
   private allowed(productId: string, packageValue: string): AllowedProduct | undefined {
     return this.allowlist.find((x) => x.productId === productId && x.packageValue === packageValue);
+  }
+
+  /** Spend that may have happened: every attempt except provably refused ones (plus v1 when enabled). */
+  private spentCents(): { all: number; today: number } {
+    const midnight = new Date().setUTCHours(0, 0, 0, 0);
+    const sum = (sql: string, ...args: number[]) => (this.db.prepare(sql).get(...args) as { cents: number }).cents;
+    let all = sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED'");
+    let today = sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED' AND created_at >= ?", midnight);
+    if (this.options.legacyV1Ledger && this.hasV1Ledger()) {
+      all += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_attempts");
+      today += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_attempts WHERE created_at >= ?", midnight);
+    }
+    return { all, today };
+  }
+
+  private hasV1Ledger(): boolean {
+    return !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bitrefill_attempts'").get();
+  }
+
+  private productDetail(productId: string): Promise<ProductDetail> {
+    return this.mcpTool<ProductDetail>("get-product-details", { product_id: productId, currency: "USD" });
   }
 
   private getAttempt(attemptId: string): AttemptRow | undefined {
@@ -447,6 +522,74 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new McpError("unparseable_response");
     return parsed as T;
   }
+}
+
+/**
+ * Builds a quote for one catalog entry from an untrusted product-details reply. The title is
+ * our own catalog text; provider text never becomes a title. Any disagreement with the
+ * catalog (id, country, stock, listed package, USD payment, stated face value) makes the
+ * entry unavailable rather than guessing.
+ */
+function quoteFrom(entry: CatalogEntry, detail: ProductDetail): RewardCandidate {
+  const pack = detail.packages?.find((x) => String(x.package_value ?? x.value) === entry.packageValue);
+  const faceAmount = Number(pack?.package_value ?? pack?.value);
+  const stated: Money | undefined = pack?.package_currency && (pack.package_currency === "INR" || pack.package_currency === "USD") &&
+    Number.isFinite(faceAmount) && faceAmount > 0
+    ? { amountMinor: Math.round(faceAmount * 100), currency: pack.package_currency } : undefined;
+  const faceAgrees = !stated || (stated.currency === entry.faceValue.currency && stated.amountMinor === entry.faceValue.amountMinor);
+  const valid = detail.id === entry.productId && detail.country_code === entry.country &&
+    detail.in_stock === true && !!pack && pack.payment_currency === "USD" && faceAgrees;
+  let cents = 0;
+  if (valid) {
+    try { cents = usdToCents(pack.payment_price ?? ""); } catch { /* Untrusted quote: unavailable. */ }
+  }
+  return {
+    productId: entry.productId, packageValue: entry.packageValue,
+    title: displayTitle(entry), category: entry.category, country: entry.country,
+    quotedPrice: { amountMinor: cents, currency: "USD" },
+    // Only what the provider states; never inferred from the package id.
+    faceValue: stated && faceAgrees ? stated : undefined,
+    requiresRecipientInput: detail.recipient_type !== "none", available: valid && cents > 0,
+  };
+}
+
+/**
+ * Winner-facing text from Bitrefill's redemption_info. Real shape (invoice of 4 Nov 2026):
+ * { pin, other, expirationTime, extraFields: { "PIN Code": ... } } where `other` repeats an
+ * extra field as "Label: value". Also handles code/link variants. Unknown shapes fall back
+ * to JSON so a winner is never left with nothing. SECRET: never log the result.
+ */
+export function formatRedemption(info: unknown): string | null {
+  if (info == null || info === "") return null;
+  if (typeof info === "string") return info;
+  if (typeof info !== "object" || Array.isArray(info)) return JSON.stringify(info);
+  const r = info as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" || typeof v === "number") && String(v).trim() ? String(v).trim() : null;
+  const lines: string[] = [];
+  const code = str(r.code);
+  const pin = str(r.pin);
+  if (code) lines.push(`Code: ${code}`);
+  if (pin) lines.push(code ? `PIN: ${pin}` : `Code: ${pin}`);
+  const link = str(r.link);
+  if (link && /^https:\/\//.test(link)) lines.push(`Link: ${link}`);
+  if (r.extraFields && typeof r.extraFields === "object" && !Array.isArray(r.extraFields)) {
+    for (const [label, value] of Object.entries(r.extraFields as Record<string, unknown>)) {
+      const v = str(value);
+      const l = sanitizeProviderText(label, 40);
+      if (v && l) lines.push(`${l}: ${v}`);
+    }
+  }
+  const other = str(r.other);
+  if (other && !lines.includes(other)) lines.push(other);
+  const expires = str(r.expirationTime);
+  if (expires && Number.isFinite(Date.parse(expires))) lines.push(`Valid until: ${new Date(expires).toISOString().slice(0, 10)}`);
+  const hasSecret = lines.some((l) => !l.startsWith("Valid until:"));
+  return hasSecret ? lines.join("\n") : JSON.stringify(info);
+}
+
+function toLedger(r: AttemptRow): LedgerAttempt {
+  return { attemptId: r.attempt_id, claimId: r.claim_id, productId: r.product_id, packageValue: r.package_value,
+    quotedCents: r.quoted_cents, state: r.state as AttemptState, invoiceId: r.invoice_id, createdAt: r.created_at };
 }
 
 function unavailableQuote(productId: string, packageValue: string): RewardCandidate {

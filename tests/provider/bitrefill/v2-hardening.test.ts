@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { McpBitrefillAdapterV2 } from "../../../lib/bitrefill/v2";
 import type { CompetingAttempt, PurchaseRequest, ReconcileRequest } from "../../../lib/providers/v2";
-import { FIXTURE_ACCESS_TOKEN, FIXTURE_CODE, FIXTURE_KEY, RecordedTransport } from "./transport";
+import { FIXTURE_ACCESS_TOKEN, FIXTURE_CODE, FIXTURE_KEY, FIXTURE_PIN, RecordedTransport } from "./transport";
 
 const PRICE = { amountMinor: 55, currency: "USD" as const };
 
@@ -344,7 +344,7 @@ test("codes, access tokens and the API key never leave through results, errors o
   const b = adapter(t, db.path);
   if (bought.kind === "invoiced") {
     const r = await b.getRedemption(bought.invoiceId);
-    assert.deepEqual(r, { display: JSON.stringify({ code: FIXTURE_CODE }) });
+    assert.deepEqual(r, { display: `Code: ${FIXTURE_CODE}\nPIN Code: ${FIXTURE_PIN}\nValid until: 2027-11-04` });
     assert.ok(!JSON.stringify(r).includes(FIXTURE_ACCESS_TOKEN));
   }
   b.close();
