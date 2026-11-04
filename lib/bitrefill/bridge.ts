@@ -11,7 +11,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { BitrefillAdapter, PurchaseOrderStatus, RewardProduct } from "../providers/types";
+import { PurchaseRejectedError, type BitrefillAdapter, type PurchaseOrderStatus, type RewardProduct } from "../providers/types";
 import { ANY_CATALOG_PRODUCT, initializeV1Ledger, RestBitrefillAdapter } from "./adapter";
 import { catalogKey, findByCatalogKey, REWARD_CATALOG, type CatalogEntry } from "./catalog";
 import { McpBitrefillAdapterV2 } from "./v2";
@@ -32,10 +32,14 @@ export interface CatalogBitrefillBridgeOptions {
   catalog?: readonly CatalogEntry[];
 }
 
-/** Certain refusal: no money moved in this call. The app may fail the claim cleanly. */
-export class BitrefillPurchaseRejected extends Error {
-  constructor(readonly reasonCode: string) {
-    super(`Bitrefill purchase refused before any charge: ${reasonCode}`);
+/**
+ * Certain refusal: no money moved in this call. The app may fail the claim cleanly.
+ * A PurchaseRejectedError (shared v1 contract), so `instanceof PurchaseRejectedError` works;
+ * the name stays "BitrefillPurchaseRejected" for existing name-based mapping.
+ */
+export class BitrefillPurchaseRejected extends PurchaseRejectedError {
+  constructor(reasonCode: string) {
+    super(reasonCode);
     this.name = "BitrefillPurchaseRejected";
   }
 }
@@ -93,7 +97,10 @@ export class CatalogBitrefillBridge implements BitrefillAdapter {
     const quotes = await this.v2.searchEligibleProducts({ country: input.country, category: input.category, maxSpendUsdCents: ceiling });
     return quotes
       .filter((q) => !this.options.livePurchases || this.findApproval(catalogKey(q), q.quotedPrice.amountMinor))
-      .map((q) => ({ productId: catalogKey(q), name: q.title, category: q.category, priceCents: q.quotedPrice.amountMinor }));
+      .map((q): RewardProduct => ({ productId: catalogKey(q), name: q.title, category: q.category,
+        priceCents: q.quotedPrice.amountMinor,
+        // CR-4: only when the provider stated it (v2 quote drops a face value that disagrees with the catalog).
+        ...(q.faceValue ? { faceValue: { amountMinor: q.faceValue.amountMinor, currency: q.faceValue.currency } } : {}) }));
   }
 
   async purchaseApprovedReward(input: { claimId: string; productId: string; expectedMaxPriceCents: number }): Promise<{ invoiceId: string; status: string }> {
