@@ -84,10 +84,13 @@ export function runBitrefillV2Conformance(name: string, make: () => Promise<Bitr
     assert.equal(r.kind, "uncertain");
     assert.equal(h.moneyCalls(), 1);
     const base = { attemptId: "c1", claimId: "claim-c1", productId: c.productId, packageValue: c.packageValue, quotedPrice: c.quotedPrice, startedAt };
-    const found = await h.adapter.reconcileAttempt({ ...base, excludeInvoiceIds: [] });
+    const competitor = { attemptId: "c0", productId: c.productId, packageValue: c.packageValue, quotedPrice: c.quotedPrice, startedAt: startedAt - 1 };
+    const contested = await h.adapter.reconcileAttempt({ ...base, excludeInvoiceIds: [], competingAttempts: [competitor] });
+    assert.equal(contested.kind, "ambiguous", "an app-known competing attempt must block adoption (CR-1)");
+    const found = await h.adapter.reconcileAttempt({ ...base, excludeInvoiceIds: [], competingAttempts: [] });
     assert.equal(found.kind, "matched");
     if (found.kind === "matched") {
-      const again = await h.adapter.reconcileAttempt({ ...base, excludeInvoiceIds: [found.invoiceId] });
+      const again = await h.adapter.reconcileAttempt({ ...base, excludeInvoiceIds: [found.invoiceId], competingAttempts: [] });
       assert.notEqual(again.kind, "matched", "an excluded invoice must never match");
     }
     assert.equal(h.moneyCalls(), 1, "reconciliation must never buy");

@@ -101,6 +101,23 @@ export interface ReconcileRequest {
   startedAt: number;
   /** Invoices already linked to other attempts; never matched again. */
   excludeInvoiceIds: string[];
+  /**
+   * Other attempts in the APP ledger that are still unresolved (no invoice) and could
+   * have produced the same kind of invoice. Bitrefill invoices carry no claim/attempt
+   * id, so if any of these could explain the candidate (same product, package and
+   * quoted price, started at or before the invoice), the result MUST be "ambiguous".
+   * Supplied by the app so this holds even if the adapter's own ledger is lost.
+   * (CR-1 from Codex, accepted 2026-11-04.)
+   */
+  competingAttempts: CompetingAttempt[];
+}
+
+export interface CompetingAttempt {
+  attemptId: string;
+  productId: string;
+  packageValue: string;
+  quotedPrice: Money;
+  startedAt: number;
 }
 
 export type ReconciliationResult =

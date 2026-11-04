@@ -57,3 +57,7 @@ v1 (`lib/providers/types.ts`) keeps running the live app until both v2 adapters 
 3. Hashed winner entitlement and signed player cookie.
 4. Rejected-vs-uncertain handling, behind a v1→v2 shim so the live app keeps working.
 5. Restart-recovery and duplicate-purchase tests.
+
+## Change log
+
+- **CR-1 (accepted 2026-11-04, proposed by Codex):** `ReconcileRequest.competingAttempts` is required. The app passes its other unresolved attempts that match on product, package and price. If any of them started at or before the candidate invoice, the result must be `ambiguous`, so reconciliation stays conservative even when the adapter's own ledger is lost. The conformance suite asserts this.

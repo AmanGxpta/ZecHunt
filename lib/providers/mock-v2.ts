@@ -74,6 +74,10 @@ export class MockBitrefillAdapterV2 implements BitrefillAdapterV2 {
       i.createdAt >= req.startedAt && !req.excludeInvoiceIds.includes(i.invoiceId));
     if (hits.length === 0) return { kind: "not_found" };
     if (hits.length > 1) return { kind: "ambiguous", candidateInvoiceIds: hits.map((h) => h.invoiceId) };
+    const contested = req.competingAttempts.some((a) => a.attemptId !== req.attemptId && a.productId === req.productId &&
+      a.packageValue === req.packageValue && a.quotedPrice.amountMinor === req.quotedPrice.amountMinor &&
+      a.quotedPrice.currency === req.quotedPrice.currency && a.startedAt <= hits[0].createdAt);
+    if (contested) return { kind: "ambiguous", candidateInvoiceIds: [hits[0].invoiceId] };
     return { kind: "matched", invoiceId: hits[0].invoiceId, status: "delivered" };
   }
 
