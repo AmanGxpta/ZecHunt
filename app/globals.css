@@ -52,3 +52,29 @@ body {
 @keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
 .rise { animation: rise .5s ease-out both; }
 @media (prefers-reduced-motion: reduce) { .rise, .pulse-ring::before { animation: none; } }
+
+/* ---------- hunt camera ---------- */
+@keyframes chest-float { 0%, 100% { transform: translateY(0) } 50% { transform: translateY(-10px) } }
+@keyframes chest-arrive { 0% { opacity: 0; transform: scale(.4) translateY(60px) } 70% { opacity: 1; transform: scale(1.06) } 100% { transform: scale(1) } }
+@keyframes chest-shake { 0%, 100% { transform: rotate(0) } 20% { transform: rotate(-4deg) } 40% { transform: rotate(4deg) } 60% { transform: rotate(-3deg) } 80% { transform: rotate(2deg) } }
+@keyframes rays-spin { to { transform: rotate(360deg) } }
+@keyframes coin-burst {
+  0% { opacity: 0; transform: translate(0, 0) scale(.4) rotateY(0) }
+  15% { opacity: 1 }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(1) rotateY(720deg) }
+}
+@keyframes scan-line { 0% { top: 8% } 100% { top: 88% } }
+@keyframes sheet-up { from { transform: translateY(100%) } to { transform: none } }
+@keyframes sparkle { 0%, 100% { opacity: 0; transform: scale(.4) } 50% { opacity: 1; transform: scale(1) } }
+.chest-float { animation: chest-float 3.2s ease-in-out infinite }
+.chest-arrive { animation: chest-arrive .9s cubic-bezier(.2, .9, .3, 1.2) both }
+.chest-shake { animation: chest-shake .45s ease-in-out }
+.rays { background: repeating-conic-gradient(from 0deg, #f2b54540 0deg 8deg, transparent 8deg 22deg); animation: rays-spin 18s linear infinite; mask: radial-gradient(circle, #000 20%, transparent 68%) }
+.coin { animation: coin-burst 1.4s cubic-bezier(.15, .8, .3, 1) forwards }
+.scan-line { animation: scan-line 1.8s ease-in-out infinite alternate }
+.sheet-up { animation: sheet-up .45s cubic-bezier(.2, .9, .3, 1) both }
+.sparkle { animation: sparkle 1.6s ease-in-out infinite }
+@media (prefers-reduced-motion: reduce) {
+  .chest-float, .rays, .scan-line, .sparkle { animation: none }
+  .coin { animation-duration: .01s }
+}
