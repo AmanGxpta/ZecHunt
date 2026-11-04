@@ -715,6 +715,7 @@ export interface RewardOption {
   priceInr: number;
   /** Face value in rupees when the provider states it, else an estimate from the price. */
   faceInr: number;
+  imageUrl: string | null;
 }
 
 /** The caller's claim on this quest if it is still waiting for a reward choice. */
@@ -738,6 +739,7 @@ export async function listRewardOptions(
   const options = (await eligibleProducts(bitrefill, q)).map((p) => ({
     productId: p.productId, name: p.name, category: p.category, priceCents: p.priceCents, priceInr: centsToInr(p.priceCents),
     faceInr: p.faceValue?.currency === "INR" ? Math.round(p.faceValue.amountMinor / 100) : centsToInr(p.priceCents),
+    imageUrl: p.imageUrl && /^https:\/\/[a-z0-9.-]*bitrefill\.com\//i.test(p.imageUrl) ? p.imageUrl : null,
   }));
   const recommendation = await recommendReward(options, { capCents: q.reward_cap_cents, questTitle: q.title });
   return { claimId, options, recommendation };

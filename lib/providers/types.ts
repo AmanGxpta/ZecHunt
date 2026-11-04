@@ -28,6 +28,8 @@ export interface RewardProduct {
   priceCents: number;
   /** What the winner receives, when the provider states it (CR-4), e.g. INR 5000 paise. */
   faceValue?: { amountMinor: number; currency: "INR" | "USD" };
+  /** Brand logo. https only, from the provider's own image host; the UI shows it as an <img>. */
+  imageUrl?: string;
 }
 
 /**

@@ -65,3 +65,4 @@ v1 (`lib/providers/types.ts`) keeps running the live app until both v2 adapters 
 - **CR-3 (accepted 2026-11-04):** `npm test` runs `tests/**/*.test.ts`, which includes the provider and conformance suites.
 - **CR-4 (accepted 2026-11-04):** v1 `RewardProduct.faceValue?: { amountMinor, currency }`. The app shows the face value when it's present. **Adapter follow-up:** the bridge should populate it.
 - **v1 certain-refusal signal (2026-11-04):** `PurchaseRejectedError(reasonCode)` in `lib/providers/types.ts`. The live provider wiring maps `BitrefillPurchaseRejected` onto it, and `fulfillClaim` fails the claim cleanly. Every other purchase error is still treated as uncertain.
+- **CR-5 (2026-11-04, from Claude):** v1 `RewardProduct.imageUrl?: string` holds the brand logo. The app shows it only if it's `https://` on a `bitrefill.com` host.
