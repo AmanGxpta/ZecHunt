@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { McpBitrefillAdapterV2 } from "../../../lib/bitrefill/v2";
 import { runBitrefillV2Conformance } from "../../contracts/bitrefill-v2";
-import { FIXTURE_CODE, FIXTURE_KEY, RecordedTransport } from "./transport";
+import { FIXTURE_CODE, FIXTURE_KEY, FIXTURE_PIN, RecordedTransport } from "./transport";
 
 function harness() {
   const transport = new RecordedTransport();
@@ -58,7 +58,7 @@ test("v2 never returns redemption data in order status", async () => {
   const status = await h.adapter.getOrderStatus(result.invoiceId);
   assert.deepEqual(status, { status: "delivered", redemptionAvailable: true });
   assert.ok(!JSON.stringify(status).includes(FIXTURE_CODE));
-  assert.deepEqual(await h.adapter.getRedemption(result.invoiceId), { display: JSON.stringify({ code: FIXTURE_CODE }) });
+  assert.deepEqual(await h.adapter.getRedemption(result.invoiceId), { display: `Code: ${FIXTURE_CODE}\nPIN Code: ${FIXTURE_PIN}\nValid until: 2027-11-04` });
   h.adapter.close();
 });
 
