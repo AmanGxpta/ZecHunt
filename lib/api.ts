@@ -45,3 +45,8 @@ export function withPlayerCookie(res: NextResponse, session: { id: string; isNew
 export function creatorTokenFrom(req: NextRequest): string | null {
   return req.headers.get("x-creator-token");
 }
+
+/** Best-effort client IP for rate limiting. Only trusted behind a proxy that sets it. */
+export function clientIp(req: NextRequest): string {
+  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || "local";
+}

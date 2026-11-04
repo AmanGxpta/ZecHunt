@@ -9,12 +9,14 @@ import {
   createQuest,
   fulfillClaim,
   getClaimStatus,
-  MAX_CHECKPOINT_FAILURES,
+  CHECKPOINT_LIMITS,
+  getCheckpointCode,
   reconcileFulfillments,
   reserveWinnerSlot,
   submitCheckpoint,
   syncFunding,
 } from "../lib/quests/service";
+import { CODE_WINDOW_MS, currentCode, verifyCode } from "../lib/quests/checkpoint";
 
 process.env.BITREFILL_CREDIT_USD = "25";
 process.env.ZECHUNT_SECRET = "test-secret";
@@ -39,11 +41,23 @@ async function fundedQuest(ctx: ReturnType<typeof setup>, category = "food", cap
   return { ...created, questId: created.quest.id };
 }
 
+/** What the checkpoint volunteer's screen shows right now. */
+function codeOf(ctx: ReturnType<typeof setup>, questId: string, now = Date.now()) {
+  const { checkpoint_nonce } = ctx.db.prepare("SELECT checkpoint_nonce FROM quests WHERE id = ?").get(questId) as {
+    checkpoint_nonce: string;
+  };
+  return currentCode(questId, checkpoint_nonce, now).code;
+}
+
+function wrongCode(right: string) {
+  return right === "000000" ? "111111" : "000000";
+}
+
 async function winAs(ctx: ReturnType<typeof setup>, questId: string, code: string, session: string, now = Date.now()) {
-  const { claimToken } = submitCheckpoint(ctx.db, questId, code, session, now);
+  const { claimToken } = submitCheckpoint(ctx.db, questId, code, session, { now });
   const reserved = reserveWinnerSlot(ctx.db, questId, claimToken, session, now);
   if ("error" in reserved) return reserved;
-  return fulfillClaim(ctx.db, ctx.bitrefill, reserved.claimId, now);
+  return fulfillClaim(ctx.db, ctx.bitrefill, reserved.claimId, { now });
 }
 
 test("creation validates input and stores no plaintext secrets", async () => {
@@ -65,7 +79,8 @@ test("creation validates input and stores no plaintext secrets", async () => {
   const row = ctx.db.prepare("SELECT * FROM quests WHERE id = ?").get(created.questId) as Record<string, unknown>;
   for (const value of Object.values(row)) {
     assert.notEqual(value, created.creatorToken, "creator token must not be stored in plaintext");
-    assert.notEqual(value, created.checkpointCode, "checkpoint code must not be stored in plaintext");
+    assert.notEqual(value, created.checkpointKey, "checkpoint key must not be stored in plaintext");
+    assert.notEqual(value, codeOf(ctx, created.questId), "checkpoint code must not be stored");
   }
 });
 
@@ -100,15 +115,54 @@ test("funding sync requires the creator token", async () => {
   );
 });
 
-test("checkpoint locks out after repeated wrong codes", async () => {
+test("rotating checkpoint code: current and previous window valid, older rejected", async () => {
   const ctx = setup();
   const created = await fundedQuest(ctx);
-  const wrong = created.checkpointCode === "000000" ? "111111" : "000000";
-  for (let i = 0; i < MAX_CHECKPOINT_FAILURES; i++) {
-    assert.throws(() => submitCheckpoint(ctx.db, created.questId, wrong, `s${i}`), (e: unknown) => e instanceof DomainError && e.code === "invalid_code");
+  const { checkpoint_nonce: nonce } = ctx.db.prepare("SELECT checkpoint_nonce FROM quests WHERE id = ?").get(created.questId) as { checkpoint_nonce: string };
+  const t = 10 * CODE_WINDOW_MS + 5;
+  const code = currentCode(created.questId, nonce, t).code;
+  assert.match(code, /^\d{6}$/);
+  assert.ok(verifyCode(created.questId, nonce, code, t));
+  assert.ok(verifyCode(created.questId, nonce, code, t + CODE_WINDOW_MS), "grace window");
+  assert.ok(!verifyCode(created.questId, nonce, code, t + 2 * CODE_WINDOW_MS), "expired");
+  assert.ok(!verifyCode(created.questId, nonce, `${code}9`, t));
+});
+
+test("checkpoint display needs the checkpoint key or creator token", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx);
+  assert.throws(() => getCheckpointCode(ctx.db, created.questId, { checkpointKey: "nope" }), (e: unknown) => e instanceof DomainError && e.status === 403);
+  const viaKey = getCheckpointCode(ctx.db, created.questId, { checkpointKey: created.checkpointKey });
+  const viaCreator = getCheckpointCode(ctx.db, created.questId, { creatorToken: created.creatorToken });
+  assert.equal(viaKey.code, viaCreator.code);
+  assert.equal(viaKey.code, codeOf(ctx, created.questId));
+});
+
+test("wrong guesses rate-limit that player, not everyone else", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx);
+  const wrong = wrongCode(codeOf(ctx, created.questId));
+  for (let i = 0; i < CHECKPOINT_LIMITS.session.max; i++) {
+    assert.throws(() => submitCheckpoint(ctx.db, created.questId, wrong, "griefer", { ip: "1.1.1.1" }), (e: unknown) => e instanceof DomainError && e.code === "invalid_code");
   }
   assert.throws(
-    () => submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "late"),
+    () => submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "griefer", { ip: "1.1.1.1" }),
+    (e: unknown) => e instanceof DomainError && e.code === "too_many_attempts",
+  );
+  // An honest player elsewhere still gets in.
+  const ok = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "honest", { ip: "2.2.2.2" });
+  assert.ok(ok.claimToken);
+});
+
+test("rotating sessions from one IP are throttled per IP", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx);
+  const wrong = wrongCode(codeOf(ctx, created.questId));
+  for (let i = 0; i < CHECKPOINT_LIMITS.ip.max; i++) {
+    assert.throws(() => submitCheckpoint(ctx.db, created.questId, wrong, `s${i}`, { ip: "6.6.6.6" }));
+  }
+  assert.throws(
+    () => submitCheckpoint(ctx.db, created.questId, wrong, "fresh-session", { ip: "6.6.6.6" }),
     (e: unknown) => e instanceof DomainError && e.code === "too_many_attempts",
   );
 });
@@ -118,8 +172,8 @@ test("exactly one player wins; the second correct entry is rejected", async () =
   const created = await fundedQuest(ctx);
 
   // Both players pass the checkpoint before either claims: a real race.
-  const alice = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
-  const bob = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "bob");
+  const alice = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
+  const bob = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "bob");
 
   const first = reserveWinnerSlot(ctx.db, created.questId, alice.claimToken, "alice");
   assert.ok("claimId" in first);
@@ -133,8 +187,8 @@ test("exactly one player wins; the second correct entry is rejected", async () =
 
   // A new checkpoint attempt is refused once the quest is exhausted.
   assert.throws(
-    () => submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "carol"),
-    (e: unknown) => e instanceof DomainError && e.code === "quest_not_active",
+    () => submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "carol"),
+    (e: unknown) => e instanceof DomainError && e.code === "quest_exhausted",
   );
 
   const quest = ctx.db.prepare("SELECT winners_claimed, status FROM quests WHERE id = ?").get(created.questId) as {
@@ -147,7 +201,7 @@ test("exactly one player wins; the second correct entry is rejected", async () =
 test("claim tokens are single-use", async () => {
   const ctx = setup();
   const created = await fundedQuest(ctx);
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
   const first = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
   assert.ok("claimId" in first);
   const replay = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
@@ -158,7 +212,7 @@ test("claim tokens are single-use", async () => {
 test("a claim token cannot be used by another session", async () => {
   const ctx = setup();
   const created = await fundedQuest(ctx);
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
   const stolen = reserveWinnerSlot(ctx.db, created.questId, claimToken, "mallory");
   assert.ok("error" in stolen);
   assert.equal(stolen.error, "invalid_token");
@@ -168,7 +222,7 @@ test("expired claim tokens are rejected", async () => {
   const ctx = setup();
   const created = await fundedQuest(ctx);
   const t0 = 1_000_000;
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice", t0);
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId, t0), "alice", { now: t0 });
   const late = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice", t0 + 11 * 60 * 1000);
   assert.ok("error" in late);
   assert.equal(late.error, "invalid_token");
@@ -205,7 +259,7 @@ test("spend guard denies when a product slips past the search filter", async () 
     },
     getOrderStatus: async () => ({ status: "delivered" }),
   };
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
   const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
   assert.ok("claimId" in r);
   const outcome = await fulfillClaim(ctx.db, leaky, r.claimId);
@@ -220,7 +274,7 @@ test("credit limit caps the reward budget across quests", async () => {
     const ctx = setup();
     const created = await fundedQuest(ctx, "food", 500);
     // Cap is $5, credit is $3: the $5 product is excluded, the $3 product is allowed.
-    const outcome = await winAs(ctx, created.questId, created.checkpointCode, "alice");
+    const outcome = await winAs(ctx, created.questId, codeOf(ctx, created.questId), "alice");
     assert.ok(!("error" in outcome));
     assert.equal(outcome.purchase?.priceCents, 300);
   } finally {
@@ -238,7 +292,7 @@ test("a failed purchase call is never retried blindly and is flagged for reconci
     },
     getOrderStatus: async () => ({ status: "delivered" }),
   };
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
   const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
   assert.ok("claimId" in r);
   const outcome = await fulfillClaim(ctx.db, flaky, r.claimId);
@@ -254,7 +308,7 @@ test("a failed purchase call is never retried blindly and is flagged for reconci
 test("a duplicate fulfillment of a delivered claim keeps it delivered", async () => {
   const ctx = setup();
   const created = await fundedQuest(ctx);
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
   const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
   assert.ok("claimId" in r);
   const first = await fulfillClaim(ctx.db, ctx.bitrefill, r.claimId);
@@ -267,14 +321,14 @@ test("a duplicate fulfillment of a delivered claim keeps it delivered", async ()
 test("reconciler flags stale PURCHASE_PENDING attempts but leaves fresh ones alone", async () => {
   const ctx = setup();
   const created = await fundedQuest(ctx);
-  const { claimToken } = submitCheckpoint(ctx.db, created.questId, created.checkpointCode, "alice");
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
   const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
   assert.ok("claimId" in r);
   const now = Date.now();
   // Simulate a crash after persisting intent but before calling Bitrefill.
   ctx.db.prepare(
-    `INSERT INTO purchase_attempts (claim_id, product_id, product_name, quoted_cents, state, invoice_id, created_at, updated_at)
-     VALUES (?, 'mock-food-3', 'Mock food voucher $3', 300, 'PURCHASE_PENDING', NULL, ?, ?)`,
+    `INSERT INTO purchase_attempts (claim_id, product_id, product_name, quoted_cents, provider_mode, state, invoice_id, created_at, updated_at)
+     VALUES (?, 'mock-food-3', 'Mock food voucher $3', 300, 'mock', 'PURCHASE_PENDING', NULL, ?, ?)`,
   ).run(r.claimId, now - 120_000, now - 120_000);
   ctx.db.prepare("UPDATE claims SET status = 'purchase_pending' WHERE id = ?").run(r.claimId);
 

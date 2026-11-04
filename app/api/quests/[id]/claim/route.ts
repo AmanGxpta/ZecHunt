@@ -20,7 +20,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const status = reserved.error === "quest_exhausted" || reserved.error === "already_claimed" ? 409 : 400;
       return withPlayerCookie(NextResponse.json({ error: reserved.error }, { status }), session);
     }
-    const outcome = await fulfillClaim(db, getProviders().bitrefill, reserved.claimId);
+    const { bitrefill, modes } = getProviders();
+    const outcome = await fulfillClaim(db, bitrefill, reserved.claimId, { bitrefillMode: modes.bitrefill });
     return withPlayerCookie(NextResponse.json(outcome, { status: 200 }), session);
   } catch (err) {
     return withPlayerCookie(errorResponse(err), session);
@@ -41,7 +42,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       const order = await getProviders().bitrefill.getOrderStatus(status.purchase.invoiceId);
       redemptionData = order.redemptionData;
     }
-    return withPlayerCookie(NextResponse.json({ claim: status, redemptionData }), session);
+    return withPlayerCookie(
+      NextResponse.json({ claim: status, redemptionData }, { headers: { "cache-control": "no-store" } }),
+      session,
+    );
   } catch (err) {
     return withPlayerCookie(errorResponse(err), session);
   }

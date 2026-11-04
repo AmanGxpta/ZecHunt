@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { errorResponse, playerSession, readJson, withPlayerCookie } from "@/lib/api";
+import { clientIp, errorResponse, playerSession, readJson, withPlayerCookie } from "@/lib/api";
 import { getDb } from "@/lib/db";
 import { submitCheckpoint } from "@/lib/quests/service";
 
@@ -15,7 +15,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         session,
       );
     }
-    const result = submitCheckpoint(getDb(), id, body.code, session.id);
+    const result = submitCheckpoint(getDb(), id, body.code, session.id, { ip: clientIp(req) });
     return withPlayerCookie(NextResponse.json(result), session);
   } catch (err) {
     return withPlayerCookie(errorResponse(err), session);

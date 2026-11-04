@@ -3,19 +3,24 @@ import { tx } from "../db";
 import { DomainError } from "../errors";
 import {
   keyedHash,
-  normalizeCode,
-  randomCheckpointCode,
   randomId,
   randomToken,
   safeEqualHex,
 } from "../crypto";
 import { checkSpend } from "../policy/spend-guard";
+import { currentCode, verifyCode } from "./checkpoint";
 import type { BitrefillAdapter, ZcashAdapter } from "../providers/types";
 import { selectReward } from "../providers/select";
 
 export const MIN_CONFIRMATIONS = 1;
 export const CLAIM_TOKEN_TTL_MS = 10 * 60 * 1000;
-export const MAX_CHECKPOINT_FAILURES = 10;
+/** Failed guesses allowed per player session, per IP, and per quest, inside each window. */
+export const CHECKPOINT_LIMITS = {
+  session: { max: 5, windowMs: 10 * 60_000 },
+  ip: { max: 20, windowMs: 10 * 60_000 },
+  quest: { max: 60, windowMs: 60_000 },
+} as const;
+export type ProviderMode = "mock" | "live";
 /** Test-network activation threshold: 0.01 TAZ. Not an exchange rate. */
 export const DEFAULT_EXPECTED_ZATOSHIS = 1_000_000;
 export const MAX_REWARD_CAP_CENTS = 500;
@@ -47,9 +52,11 @@ interface QuestRow {
   expected_zatoshis: number;
   funded_zatoshis: number;
   status: "awaiting_funding" | "active" | "exhausted";
-  checkpoint_code_hash: string;
-  checkpoint_failures: number;
+  checkpoint_nonce: string;
+  checkpoint_key_hash: string;
   creator_token_hash: string;
+  zcash_mode: ProviderMode;
+  activated_at: number | null;
   created_at: number;
 }
 
@@ -67,6 +74,7 @@ interface AttemptRow {
   product_id: string;
   product_name: string;
   quoted_cents: number;
+  provider_mode: ProviderMode;
   state: string;
   invoice_id: string | null;
 }
@@ -81,12 +89,15 @@ export interface PublicQuest {
   rewardCapCents: number;
   status: QuestRow["status"];
   winnersRemaining: number;
+  zcashMode: ProviderMode;
 }
 
 export interface CreatorQuest extends PublicQuest {
   fundingAddress: string;
   expectedZatoshis: number;
   fundedZatoshis: number;
+  activatedAt: number | null;
+  fundingEvents: { txid: string; amountZatoshis: number; confirmations: number }[];
 }
 
 function toPublic(q: QuestRow): PublicQuest {
@@ -98,15 +109,28 @@ function toPublic(q: QuestRow): PublicQuest {
     rewardCapCents: q.reward_cap_cents,
     status: q.status,
     winnersRemaining: Math.max(0, q.max_winners - q.winners_claimed),
+    zcashMode: q.zcash_mode,
   };
 }
 
-function toCreator(q: QuestRow): CreatorQuest {
+function toCreator(db: DatabaseSync, q: QuestRow): CreatorQuest {
+  const events = db
+    .prepare(
+      `SELECT txid, amount_zatoshis, confirmations FROM funding_events
+       WHERE quest_id = ? ORDER BY seen_at, output_id`,
+    )
+    .all(q.id) as { txid: string; amount_zatoshis: number; confirmations: number }[];
   return {
     ...toPublic(q),
     fundingAddress: q.funding_address,
     expectedZatoshis: q.expected_zatoshis,
     fundedZatoshis: q.funded_zatoshis,
+    activatedAt: q.activated_at,
+    fundingEvents: events.map((e) => ({
+      txid: e.txid,
+      amountZatoshis: Number(e.amount_zatoshis),
+      confirmations: Number(e.confirmations),
+    })),
   };
 }
 
@@ -124,8 +148,8 @@ function verifyCreator(q: QuestRow, creatorToken: string | null): void {
   }
 }
 
-function checkpointHash(questId: string, code: string): string {
-  return keyedHash(`checkpoint:${questId}:${code}`);
+function verifyCheckpointKey(q: QuestRow, key: string | null): boolean {
+  return !!key && safeEqualHex(keyedHash(key), q.checkpoint_key_hash);
 }
 
 function reservedCents(db: DatabaseSync): number {
@@ -151,7 +175,7 @@ export async function createQuest(
   db: DatabaseSync,
   zcash: ZcashAdapter,
   input: CreateQuestInput,
-  now = Date.now(),
+  { now = Date.now(), zcashMode = "mock" as ProviderMode } = {},
 ) {
   const title = input.title?.trim() ?? "";
   const clue = input.clue?.trim() ?? "";
@@ -173,16 +197,16 @@ export async function createQuest(
   }
 
   const id = randomId();
-  // Provider call happens outside the transaction; it is read-only.
+  // Allocates a fresh shielded receiving address in the watch-only wallet.
   const fundingAddress = await zcash.getQuestAddress(id);
-  const checkpointCode = randomCheckpointCode();
   const creatorToken = randomToken();
+  const checkpointKey = randomToken();
 
   db.prepare(
     `INSERT INTO quests (id, title, clue, reward_category, reward_cap_cents, max_winners,
        winners_claimed, funding_address, expected_zatoshis, funded_zatoshis, status,
-       checkpoint_code_hash, checkpoint_failures, creator_token_hash, created_at)
-     VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, 0, 'awaiting_funding', ?, 0, ?, ?)`,
+       checkpoint_nonce, checkpoint_key_hash, creator_token_hash, zcash_mode, activated_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, 0, 'awaiting_funding', ?, ?, ?, ?, NULL, ?)`,
   ).run(
     id,
     title,
@@ -191,16 +215,18 @@ export async function createQuest(
     input.rewardCapCents,
     fundingAddress,
     DEFAULT_EXPECTED_ZATOSHIS,
-    checkpointHash(id, checkpointCode),
+    randomToken(),
+    keyedHash(checkpointKey),
     keyedHash(creatorToken),
+    zcashMode,
     now,
   );
 
   // Creator secrets are returned exactly once here and never stored in plaintext.
   return {
-    quest: toCreator(loadQuest(db, id)),
+    quest: toCreator(db, loadQuest(db, id)),
     creatorToken,
-    checkpointCode,
+    checkpointKey,
   };
 }
 
@@ -211,7 +237,25 @@ export function getPublicQuest(db: DatabaseSync, id: string): PublicQuest {
 export function getCreatorQuest(db: DatabaseSync, id: string, creatorToken: string | null): CreatorQuest {
   const q = loadQuest(db, id);
   verifyCreator(q, creatorToken);
-  return toCreator(q);
+  return toCreator(db, q);
+}
+
+/**
+ * The code the checkpoint volunteer shows. Requires the checkpoint key (given to
+ * whoever staffs the checkpoint) or the creator token.
+ */
+export function getCheckpointCode(
+  db: DatabaseSync,
+  id: string,
+  auth: { checkpointKey?: string | null; creatorToken?: string | null },
+  now = Date.now(),
+) {
+  const q = loadQuest(db, id);
+  const creatorOk = !!auth.creatorToken && safeEqualHex(keyedHash(auth.creatorToken), q.creator_token_hash);
+  if (!creatorOk && !verifyCheckpointKey(q, auth.checkpointKey ?? null)) {
+    throw new DomainError("forbidden", 403, "Checkpoint key required");
+  }
+  return { ...currentCode(q.id, q.checkpoint_nonce, now), title: q.title, status: q.status };
 }
 
 /**
@@ -225,8 +269,18 @@ export async function syncFunding(
   creatorToken: string | null,
   now = Date.now(),
 ): Promise<CreatorQuest> {
-  const q = loadQuest(db, id);
-  verifyCreator(q, creatorToken);
+  verifyCreator(loadQuest(db, id), creatorToken);
+  return syncQuestFunding(db, zcash, id, now);
+}
+
+/** Worker entry point: no creator token, because it runs server-side only. */
+export async function syncQuestFunding(
+  db: DatabaseSync,
+  zcash: ZcashAdapter,
+  id: string,
+  now = Date.now(),
+): Promise<CreatorQuest> {
+  loadQuest(db, id);
   const events = await zcash.findFunding(id);
 
   return tx(db, () => {
@@ -236,6 +290,8 @@ export async function syncFunding(
        ON CONFLICT(output_id) DO UPDATE SET confirmations = excluded.confirmations`,
     );
     for (const e of events) {
+      if (typeof e.amountZatoshis !== "bigint" || e.amountZatoshis <= 0n) continue;
+      if (!Number.isSafeInteger(e.confirmations) || e.confirmations < 0) continue;
       upsert.run(e.outputId, id, e.txid, Number(e.amountZatoshis), e.confirmations, now);
     }
     const confirmed = db
@@ -247,12 +303,23 @@ export async function syncFunding(
     const total = Number(confirmed.total);
     const current = loadQuest(db, id);
     if (current.status === "awaiting_funding" && total >= current.expected_zatoshis) {
-      db.prepare("UPDATE quests SET status = 'active', funded_zatoshis = ? WHERE id = ?").run(total, id);
+      db.prepare("UPDATE quests SET status = 'active', funded_zatoshis = ?, activated_at = ? WHERE id = ?").run(
+        total,
+        now,
+        id,
+      );
     } else {
       db.prepare("UPDATE quests SET funded_zatoshis = ? WHERE id = ?").run(total, id);
     }
-    return toCreator(loadQuest(db, id));
+    return toCreator(db, loadQuest(db, id));
   });
+}
+
+/** Quests the funding worker should keep scanning. */
+export function questsAwaitingFunding(db: DatabaseSync): string[] {
+  return (
+    db.prepare("SELECT id FROM quests WHERE status = 'awaiting_funding' ORDER BY created_at").all() as { id: string }[]
+  ).map((r) => r.id);
 }
 
 // ---------- checkpoint and claim ----------
@@ -263,20 +330,42 @@ export function submitCheckpoint(
   id: string,
   code: string,
   playerSession: string,
-  now = Date.now(),
+  { now = Date.now(), ip = "unknown" }: { now?: number; ip?: string } = {},
 ): { claimToken: string; expiresAt: number } {
+  const ipHash = keyedHash(`ip:${ip}`);
   const outcome = tx(db, () => {
     const q = loadQuest(db, id);
+    if (q.status === "exhausted") return { ok: false as const, error: "quest_exhausted" };
     if (q.status !== "active") return { ok: false as const, error: "quest_not_active" };
-    if (q.checkpoint_failures >= MAX_CHECKPOINT_FAILURES) return { ok: false as const, error: "too_many_attempts" };
     const existing = db
       .prepare("SELECT id FROM claims WHERE quest_id = ? AND player_session = ?")
       .get(id, playerSession);
     if (existing) return { ok: false as const, error: "already_claimed" };
 
-    const normalized = normalizeCode(code);
-    if (!safeEqualHex(checkpointHash(id, normalized), q.checkpoint_code_hash)) {
-      db.prepare("UPDATE quests SET checkpoint_failures = checkpoint_failures + 1 WHERE id = ?").run(id);
+    const count = (where: string, windowMs: number, ...args: string[]) =>
+      Number(
+        (
+          db
+            .prepare(`SELECT COUNT(*) AS n FROM checkpoint_failures WHERE quest_id = ? AND at > ? ${where}`)
+            .get(id, now - windowMs, ...args) as { n: number }
+        ).n,
+      );
+    const L = CHECKPOINT_LIMITS;
+    if (
+      count("AND player_session = ?", L.session.windowMs, playerSession) >= L.session.max ||
+      count("AND ip_hash = ?", L.ip.windowMs, ipHash) >= L.ip.max ||
+      count("", L.quest.windowMs) >= L.quest.max
+    ) {
+      return { ok: false as const, error: "too_many_attempts" };
+    }
+
+    if (!verifyCode(q.id, q.checkpoint_nonce, code, now)) {
+      db.prepare("INSERT INTO checkpoint_failures (quest_id, player_session, ip_hash, at) VALUES (?, ?, ?, ?)").run(
+        id,
+        playerSession,
+        ipHash,
+        now,
+      );
       return { ok: false as const, error: "invalid_code" };
     }
 
@@ -343,7 +432,13 @@ export function reserveWinnerSlot(
 export type ClaimOutcome = {
   claimId: string;
   claimStatus: string;
-  purchase: { productName: string; priceCents: number; state: string; invoiceId: string | null } | null;
+  purchase: {
+    productName: string;
+    priceCents: number;
+    state: string;
+    invoiceId: string | null;
+    providerMode: ProviderMode;
+  } | null;
   reason?: string;
 };
 
@@ -355,7 +450,7 @@ export async function fulfillClaim(
   db: DatabaseSync,
   bitrefill: BitrefillAdapter,
   claimId: string,
-  now = Date.now(),
+  { now = Date.now(), bitrefillMode = "mock" as ProviderMode } = {},
 ): Promise<ClaimOutcome> {
   const claim = db.prepare("SELECT * FROM claims WHERE id = ?").get(claimId) as ClaimRow | undefined;
   if (!claim) throw new DomainError("claim_not_found", 404);
@@ -397,9 +492,9 @@ export async function fulfillClaim(
       return { ok: false as const, reason: guard.reason };
     }
     db.prepare(
-      `INSERT INTO purchase_attempts (claim_id, product_id, product_name, quoted_cents, state, invoice_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'PURCHASE_PENDING', NULL, ?, ?)`,
-    ).run(claimId, product.productId, product.name, product.priceCents, now, now);
+      `INSERT INTO purchase_attempts (claim_id, product_id, product_name, quoted_cents, provider_mode, state, invoice_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'PURCHASE_PENDING', NULL, ?, ?)`,
+    ).run(claimId, product.productId, product.name, product.priceCents, bitrefillMode, now, now);
     db.prepare("UPDATE claims SET status = 'purchase_pending', updated_at = ? WHERE id = ?").run(now, claimId);
     return { ok: true as const };
   });
@@ -470,6 +565,7 @@ function loadOutcome(db: DatabaseSync, claimId: string, reason?: string): ClaimO
           priceCents: attempt.quoted_cents,
           state: attempt.state,
           invoiceId: attempt.invoice_id,
+          providerMode: attempt.provider_mode,
         }
       : null,
     reason,

@@ -24,11 +24,6 @@ export function randomId(): string {
   return randomBytes(9).toString("base64url");
 }
 
-/** Six-digit checkpoint code. Shown to the creator once; only its keyed hash is stored. */
-export function randomCheckpointCode(): string {
-  return String(randomInt(0, 1_000_000)).padStart(6, "0");
-}
-
 export function normalizeCode(input: string): string {
   return input.replace(/\D/g, "");
 }

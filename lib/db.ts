@@ -19,9 +19,12 @@ CREATE TABLE IF NOT EXISTS quests (
   expected_zatoshis     INTEGER NOT NULL CHECK (expected_zatoshis > 0),
   funded_zatoshis       INTEGER NOT NULL DEFAULT 0,
   status                TEXT NOT NULL CHECK (status IN ('awaiting_funding','active','exhausted')),
-  checkpoint_code_hash  TEXT NOT NULL,
-  checkpoint_failures   INTEGER NOT NULL DEFAULT 0,
+  -- Rotating checkpoint code: secret = HMAC(ZECHUNT_SECRET, id:nonce). Nonce alone is useless.
+  checkpoint_nonce      TEXT NOT NULL,
+  checkpoint_key_hash   TEXT NOT NULL,
   creator_token_hash    TEXT NOT NULL,
+  zcash_mode            TEXT NOT NULL CHECK (zcash_mode IN ('mock','live')),
+  activated_at          INTEGER,
   created_at            INTEGER NOT NULL
 );
 
@@ -35,6 +38,15 @@ CREATE TABLE IF NOT EXISTS funding_events (
   seen_at           INTEGER NOT NULL
 );
 
+-- Failed checkpoint guesses, for per-player, per-IP and per-quest rate limits.
+CREATE TABLE IF NOT EXISTS checkpoint_failures (
+  quest_id        TEXT NOT NULL REFERENCES quests(id),
+  player_session  TEXT NOT NULL,
+  ip_hash         TEXT NOT NULL,
+  at              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS checkpoint_failures_quest_at ON checkpoint_failures (quest_id, at);
+
 CREATE TABLE IF NOT EXISTS claim_tokens (
   token_hash      TEXT PRIMARY KEY,
   quest_id        TEXT NOT NULL REFERENCES quests(id),
@@ -43,7 +55,9 @@ CREATE TABLE IF NOT EXISTS claim_tokens (
   used_at         INTEGER
 );
 
--- One claim per player per quest, enforced by the database.
+-- One claim per player per quest, enforced by the database. With max_winners = 1
+-- the quest row update below is the single-winner gate; UNIQUE(quest_id) on claims
+-- would also hold today but would block raising max_winners later.
 CREATE TABLE IF NOT EXISTS claims (
   id              TEXT PRIMARY KEY,
   quest_id        TEXT NOT NULL REFERENCES quests(id),
@@ -60,8 +74,9 @@ CREATE TABLE IF NOT EXISTS purchase_attempts (
   product_id        TEXT NOT NULL,
   product_name      TEXT NOT NULL,
   quoted_cents      INTEGER NOT NULL CHECK (quoted_cents > 0),
+  provider_mode     TEXT NOT NULL CHECK (provider_mode IN ('mock','live')),
   state             TEXT NOT NULL CHECK (state IN ('PURCHASE_PENDING','INVOICE_CREATED','DELIVERED','NEEDS_RECONCILIATION','FAILED')),
-  invoice_id        TEXT,
+  invoice_id        TEXT UNIQUE,
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL
 );
