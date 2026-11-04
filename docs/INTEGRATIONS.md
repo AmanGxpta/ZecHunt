@@ -32,7 +32,12 @@ How the app uses the adapter:
 
 **Gate 2 acceptance:** create a quest in live mode, send 0.01 TAZ to the shown address, and watch the dashboard flip to *Funded privately*. The dashboard shows the explorer link for the txid.
 
-## Bitrefill: contract for the Codex Bitrefill session
+## Bitrefill: wired (`RestBitrefillAdapter`, see docs/BITREFILL_INTEGRATION.md)
+
+Set `ZECHUNT_BITREFILL_MODE=live` + `BITREFILL_API_KEY`. Purchases stay dry-run unless `ZECHUNT_LIVE_PURCHASES=true` **and** a human approval is recorded ≤15 min before the claim.
+Note: in dry-run, a winning claim ends in `needs_reconciliation`, and the quest is used up. Use a throwaway quest for dry runs.
+
+## Bitrefill: original contract
 
 Create `lib/bitrefill/index.ts` exporting:
 

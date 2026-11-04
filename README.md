@@ -42,9 +42,9 @@ Live Zcash: see `docs/INTEGRATIONS.md`. Then run `npm run worker` alongside the 
 
 | Capability | Status |
 | --- | --- |
-| Creator / player / checkpoint UX, claims, guard, reconciliation | Implemented, 19 tests |
+| Creator / player / checkpoint UX, claims, guard, reconciliation | Implemented, 22 tests |
 | Zcash shielded funding detection (zkool watch-only) | Live-verified at adapter level (docs/ZCASH_SPIKE.md). Wired in app, end-to-end run pending |
-| Bitrefill catalog + purchase | Mock adapter. Live adapter in progress (Codex) |
+| Bitrefill catalog + purchase | Live REST adapter wired (Swiggy ₹50, about $0.55), dry run by default. Catalog verified via CLI. Real purchase pending API key + human approval |
 | Winner TAZ payout | Not implemented (optional) |
 
 The UI shows a red **Simulated** badge on anything produced by a mock provider.

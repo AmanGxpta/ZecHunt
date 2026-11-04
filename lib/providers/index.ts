@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { DomainError } from "../errors";
+import { RestBitrefillAdapter } from "../bitrefill/adapter";
 import { ZkoolZcashAdapter } from "../zcash/zkool";
 import { MockBitrefillAdapter, MockZcashAdapter } from "./mock";
 import type { BitrefillAdapter, Providers, ZcashAdapter } from "./types";
@@ -36,12 +37,21 @@ function liveZcash(): ZcashAdapter {
 }
 
 function liveBitrefill(): BitrefillAdapter {
-  // Wired at integration time once lib/bitrefill/ (Codex) lands. See docs/INTEGRATIONS.md.
-  throw new DomainError(
-    "bitrefill_live_not_integrated",
-    501,
-    "ZECHUNT_BITREFILL_MODE=live needs the lib/bitrefill adapter, which is not merged yet",
-  );
+  const apiKey = process.env.BITREFILL_API_KEY;
+  if (!apiKey) {
+    throw new DomainError("bitrefill_not_configured", 500, "BITREFILL_API_KEY is required for ZECHUNT_BITREFILL_MODE=live");
+  }
+  const capCents = Math.min(500, Math.round(Number(process.env.BITREFILL_CREDIT_USD ?? "25") * 100));
+  return new RestBitrefillAdapter({
+    apiKey,
+    dbPath: process.env.ZECHUNT_BITREFILL_DB ?? resolve(process.cwd(), ".data/bitrefill.db"),
+    // Real balance spending needs this exact opt-in AND a human approval (scripts/bitrefill-approve.ts).
+    livePurchases: process.env.ZECHUNT_LIVE_PURCHASES === "true",
+    accountPricesAreUsd: process.env.BITREFILL_ACCOUNT_PRICES_ARE_USD === "true",
+    perPurchaseCapCents: Number(process.env.BITREFILL_PER_PURCHASE_CAP_CENTS ?? 55),
+    dailyCapCents: Number(process.env.BITREFILL_DAILY_CAP_CENTS ?? 55),
+    totalCapCents: Math.min(capCents, Number(process.env.BITREFILL_TOTAL_CAP_CENTS ?? 55)),
+  });
 }
 
 /** Selects provider implementations per provider. Defaults to mock. */
