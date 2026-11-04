@@ -65,6 +65,18 @@ interface QuestRow {
   zcash_mode: ProviderMode;
   activated_at: number | null;
   created_at: number;
+  paused_at: number | null;
+  cancelled_at: number | null;
+}
+
+/** What players and creators see. Pause and cancel overlay the funding lifecycle. */
+export type QuestStatus = "awaiting_funding" | "active" | "paused" | "exhausted" | "cancelled";
+
+function effectiveStatus(q: QuestRow): QuestStatus {
+  if (q.cancelled_at) return "cancelled";
+  if (q.status === "exhausted") return "exhausted";
+  if (q.paused_at && q.status === "active") return "paused";
+  return q.status;
 }
 
 interface ClaimRow {
@@ -96,7 +108,7 @@ export interface PublicQuest {
   rewardCapCents: number;
   /** What people see. Older quests fall back to a converted value. */
   rewardCapInr: number;
-  status: QuestRow["status"];
+  status: QuestStatus;
   winnersRemaining: number;
   zcashMode: ProviderMode;
 }
@@ -119,7 +131,7 @@ function toPublic(q: QuestRow): PublicQuest {
     rewardCategory: q.reward_category,
     rewardCapCents: q.reward_cap_cents,
     rewardCapInr: q.reward_cap_inr ?? centsToInr(q.reward_cap_cents),
-    status: q.status,
+    status: effectiveStatus(q),
     winnersRemaining: Math.max(0, q.max_winners - q.winners_claimed),
     zcashMode: q.zcash_mode,
   };
@@ -291,7 +303,7 @@ export function getCheckpointCode(
   if (!creatorOk && !verifyCheckpointKey(q, auth.checkpointKey ?? null)) {
     throw new DomainError("forbidden", 403, "Checkpoint key required");
   }
-  return { ...currentCode(q.id, q.checkpoint_nonce, now), title: q.title, status: q.status };
+  return { ...currentCode(q.id, q.checkpoint_nonce, now), title: q.title, status: effectiveStatus(q) };
 }
 
 /**
@@ -354,7 +366,7 @@ export async function syncQuestFunding(
 /** Quests the funding worker should keep scanning. */
 export function questsAwaitingFunding(db: DatabaseSync): string[] {
   return (
-    db.prepare("SELECT id FROM quests WHERE status = 'awaiting_funding' ORDER BY created_at").all() as { id: string }[]
+    db.prepare("SELECT id FROM quests WHERE status = 'awaiting_funding' AND cancelled_at IS NULL ORDER BY created_at").all() as { id: string }[]
   ).map((r) => r.id);
 }
 
@@ -371,8 +383,11 @@ export function submitCheckpoint(
   const ipHash = keyedHash(`ip:${ip}`);
   const outcome = tx(db, () => {
     const q = loadQuest(db, id);
-    if (q.status === "exhausted") return { ok: false as const, error: "quest_exhausted" };
-    if (q.status !== "active") return { ok: false as const, error: "quest_not_active" };
+    const st = effectiveStatus(q);
+    if (st === "exhausted") return { ok: false as const, error: "quest_exhausted" };
+    if (st === "paused") return { ok: false as const, error: "quest_paused" };
+    if (st === "cancelled") return { ok: false as const, error: "quest_cancelled" };
+    if (st !== "active") return { ok: false as const, error: "quest_not_active" };
     const existing = db
       .prepare("SELECT id FROM claims WHERE quest_id = ? AND player_session = ?")
       .get(id, playerSession);
@@ -430,7 +445,7 @@ export function reserveWinnerSlot(
   claimToken: string,
   playerSession: string,
   now = Date.now(),
-): { claimId: string } | { error: "invalid_token" | "quest_exhausted" | "quest_not_active" | "already_claimed" } {
+): { claimId: string } | { error: "invalid_token" | "quest_exhausted" | "quest_not_active" | "quest_paused" | "quest_cancelled" | "already_claimed" } {
   return tx(db, () => {
     const q = loadQuest(db, id);
     const consumed = db
@@ -445,8 +460,11 @@ export function reserveWinnerSlot(
     if (db.prepare("SELECT id FROM claims WHERE quest_id = ? AND player_session = ?").get(id, playerSession)) {
       return { error: "already_claimed" as const };
     }
-    if (q.status !== "active") {
-      return { error: q.status === "exhausted" ? ("quest_exhausted" as const) : ("quest_not_active" as const) };
+    const st = effectiveStatus(q);
+    if (st === "paused") return { error: "quest_paused" as const };
+    if (st === "cancelled") return { error: "quest_cancelled" as const };
+    if (st !== "active") {
+      return { error: st === "exhausted" ? ("quest_exhausted" as const) : ("quest_not_active" as const) };
     }
     if (q.winners_claimed >= q.max_winners) return { error: "quest_exhausted" as const };
 
@@ -723,4 +741,37 @@ export async function listRewardOptions(
   }));
   const recommendation = await recommendReward(options, { capCents: q.reward_cap_cents, questTitle: q.title });
   return { claimId, options, recommendation };
+}
+
+// ---------- creator controls ----------
+
+export type QuestControl = "pause" | "resume" | "cancel";
+
+/**
+ * Pause stops new claims (an in-flight claim token still fails at reservation).
+ * Cancel is final and only allowed before anyone has won, so no reward is ever
+ * stranded. Nothing here moves money; a testnet funding deposit is not refunded.
+ */
+export function controlQuest(db: DatabaseSync, id: string, creatorToken: string | null, action: QuestControl, now = Date.now()): CreatorQuest {
+  return tx(db, () => {
+    const q = loadQuest(db, id);
+    verifyCreator(q, creatorToken);
+    const st = effectiveStatus(q);
+    if (action === "pause") {
+      if (st !== "active") throw new DomainError("cannot_pause", 409, "Only a live quest can be paused");
+      db.prepare("UPDATE quests SET paused_at = ? WHERE id = ?").run(now, id);
+    } else if (action === "resume") {
+      if (st !== "paused") throw new DomainError("cannot_resume", 409, "This quest isn’t paused");
+      db.prepare("UPDATE quests SET paused_at = NULL WHERE id = ?").run(id);
+    } else if (action === "cancel") {
+      if (st === "cancelled") return toCreator(db, q);
+      if (q.winners_claimed > 0 || db.prepare("SELECT 1 FROM claims WHERE quest_id = ?").get(id)) {
+        throw new DomainError("cannot_cancel", 409, "Someone has already won this quest");
+      }
+      db.prepare("UPDATE quests SET cancelled_at = ? WHERE id = ?").run(now, id);
+    } else {
+      throw new DomainError("invalid_action", 400, "Unknown action");
+    }
+    return toCreator(db, loadQuest(db, id));
+  });
 }
