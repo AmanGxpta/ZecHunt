@@ -6,14 +6,14 @@ import { Button, Card, CATEGORY_LABEL, ErrorNote, Eyebrow, Shell, Spinner } from
 import { saveSecrets } from "@/lib/client/creator-store";
 
 const CATEGORIES = ["food", "mobile-recharge", "gaming"] as const;
-const CAPS = [1, 2, 3, 5];
+const CAPS = [50, 100, 250, 400];
 
 export default function CreatePage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [clue, setClue] = useState("");
   const [category, setCategory] = useState<string>("food");
-  const [cap, setCap] = useState(3);
+  const [cap, setCap] = useState(50);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -25,7 +25,7 @@ export default function CreatePage() {
       const res = await fetch("/api/quests", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title, clue, rewardCategory: category, rewardCapCents: cap * 100 }),
+        body: JSON.stringify({ title, clue, rewardCategory: category, rewardCapInr: cap }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message ?? data.error ?? "Could not create quest");
@@ -81,12 +81,13 @@ export default function CreatePage() {
               {CAPS.map((c) => (
                 <button key={c} type="button" onClick={() => setCap(c)} aria-pressed={cap === c}
                   className={`flex-1 rounded-xl border py-3 font-mono text-sm transition ${cap === c ? "border-lantern bg-lantern/10 text-lantern" : "border-line text-muted hover:border-lantern/40"}`}>
-                  ${c}
+                  ₹{c}
                 </button>
               ))}
             </div>
             <p className="mt-2 text-xs leading-5 text-muted">
               An agent picks a real product from the live catalog. The server enforces this cap and refuses anything over it.
+              Paid from a capped event-credit budget; rupee amounts are approximate.
             </p>
           </div>
         </Card>

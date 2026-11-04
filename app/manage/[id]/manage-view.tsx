@@ -4,13 +4,13 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Qr } from "@/components/qr";
 import {
-  Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatTaz, formatUsd, ModeBadge, Shell, Spinner,
+  Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr, formatTaz, ModeBadge, Shell, Spinner,
 } from "@/components/ui";
 import { loadSecrets, type CreatorSecrets } from "@/lib/client/creator-store";
 
 type Mode = "mock" | "live";
 interface CreatorQuest {
-  id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number;
+  id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number; rewardCapInr: number;
   status: "awaiting_funding" | "active" | "exhausted"; fundingAddress: string;
   expectedZatoshis: number; fundedZatoshis: number; activatedAt: number | null; zcashMode: Mode;
   fundingEvents: { txid: string; amountZatoshis: number; confirmations: number }[];
@@ -101,7 +101,7 @@ export default function ManageView({ id }: { id: string }) {
         <Eyebrow>Your quest</Eyebrow>
         <h1 className="mt-2 font-display text-4xl tracking-tight">{q.title}</h1>
         <p className="mt-2 text-muted">
-          {CATEGORY_LABEL[q.rewardCategory]} · up to {formatUsd(q.rewardCapCents)} · 1 winner
+          {CATEGORY_LABEL[q.rewardCategory]} · up to {formatInr(q.rewardCapInr)} · 1 winner
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
           <ModeBadge mode={q.zcashMode} what="Zcash funding" />

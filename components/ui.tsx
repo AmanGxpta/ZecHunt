@@ -106,6 +106,10 @@ export function formatUsd(cents: number) {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+export function formatInr(inr: number) {
+  return `₹${inr.toLocaleString("en-IN")}`;
+}
+
 export function formatTaz(zatoshis: number) {
   return `${(zatoshis / 1e8).toFixed(zatoshis % 1e6 === 0 ? 2 : 8)} TAZ`;
 }

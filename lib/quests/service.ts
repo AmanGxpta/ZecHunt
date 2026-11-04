@@ -9,6 +9,7 @@ import {
 } from "../crypto";
 import { checkSpend } from "../policy/spend-guard";
 import { currentCode, verifyCode } from "./checkpoint";
+import { centsToInr, INR_CAPS, inrCapToCents } from "../money";
 import type { BitrefillAdapter, ZcashAdapter } from "../providers/types";
 import { selectReward } from "../providers/select";
 
@@ -46,6 +47,7 @@ interface QuestRow {
   clue: string;
   reward_category: string;
   reward_cap_cents: number;
+  reward_cap_inr: number | null;
   max_winners: number;
   winners_claimed: number;
   funding_address: string;
@@ -87,6 +89,8 @@ export interface PublicQuest {
   clue: string;
   rewardCategory: string;
   rewardCapCents: number;
+  /** What people see. Older quests fall back to a converted value. */
+  rewardCapInr: number;
   status: QuestRow["status"];
   winnersRemaining: number;
   zcashMode: ProviderMode;
@@ -109,6 +113,7 @@ function toPublic(q: QuestRow): PublicQuest {
     clue: q.clue,
     rewardCategory: q.reward_category,
     rewardCapCents: q.reward_cap_cents,
+    rewardCapInr: q.reward_cap_inr ?? centsToInr(q.reward_cap_cents),
     status: q.status,
     winnersRemaining: Math.max(0, q.max_winners - q.winners_claimed),
     zcashMode: q.zcash_mode,
@@ -184,7 +189,9 @@ export interface CreateQuestInput {
   title: string;
   clue: string;
   rewardCategory: string;
-  rewardCapCents: number;
+  /** Preferred: one of INR_CAPS. Converted to a USD-cent cap for the spend guard. */
+  rewardCapInr?: number;
+  rewardCapCents?: number;
 }
 
 export async function createQuest(
@@ -204,11 +211,18 @@ export async function createQuest(
   if (!(REWARD_CATEGORIES as readonly string[]).includes(input.rewardCategory)) {
     throw new DomainError("invalid_category", 400, "Unsupported reward category");
   }
-  if (
-    !Number.isInteger(input.rewardCapCents) ||
-    input.rewardCapCents <= 0 ||
-    input.rewardCapCents > MAX_REWARD_CAP_CENTS
-  ) {
+  let rewardCapInr: number | null = null;
+  let rewardCapCents: number;
+  if (input.rewardCapInr !== undefined) {
+    if (!(INR_CAPS as readonly number[]).includes(input.rewardCapInr)) {
+      throw new DomainError("invalid_reward_cap", 400, `Reward must be one of ₹${INR_CAPS.join(", ₹")}`);
+    }
+    rewardCapInr = input.rewardCapInr;
+    rewardCapCents = inrCapToCents(input.rewardCapInr);
+  } else {
+    rewardCapCents = input.rewardCapCents ?? NaN;
+  }
+  if (!Number.isInteger(rewardCapCents) || rewardCapCents <= 0 || rewardCapCents > MAX_REWARD_CAP_CENTS) {
     throw new DomainError("invalid_reward_cap", 400, "Reward cap must be $0.01–$5.00");
   }
 
@@ -219,16 +233,17 @@ export async function createQuest(
   const checkpointKey = randomToken();
 
   db.prepare(
-    `INSERT INTO quests (id, title, clue, reward_category, reward_cap_cents, max_winners,
+    `INSERT INTO quests (id, title, clue, reward_category, reward_cap_cents, reward_cap_inr, max_winners,
        winners_claimed, funding_address, expected_zatoshis, funded_zatoshis, status,
        checkpoint_nonce, checkpoint_key_hash, creator_token_hash, zcash_mode, activated_at, created_at)
-     VALUES (?, ?, ?, ?, ?, 1, 0, ?, ?, 0, 'awaiting_funding', ?, ?, ?, ?, NULL, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?, ?, 0, 'awaiting_funding', ?, ?, ?, ?, NULL, ?)`,
   ).run(
     id,
     title,
     clue,
     input.rewardCategory,
-    input.rewardCapCents,
+    rewardCapCents,
+    rewardCapInr,
     fundingAddress,
     DEFAULT_EXPECTED_ZATOSHIS,
     randomToken(),
@@ -451,6 +466,8 @@ export type ClaimOutcome = {
   purchase: {
     productName: string;
     priceCents: number;
+    /** Approximate, for display only. */
+    priceInr: number;
     state: string;
     invoiceId: string | null;
     providerMode: ProviderMode;
@@ -578,6 +595,7 @@ function loadOutcome(db: DatabaseSync, claimId: string, reason?: string): ClaimO
       ? {
           productName: attempt.product_name,
           priceCents: attempt.quoted_cents,
+          priceInr: centsToInr(attempt.quoted_cents),
           state: attempt.state,
           invoiceId: attempt.invoice_id,
           providerMode: attempt.provider_mode,

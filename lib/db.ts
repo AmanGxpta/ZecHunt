@@ -90,6 +90,7 @@ export function openDatabase(path: string): DatabaseSync {
   db.exec(SCHEMA_SQL);
   // Additive migrations for databases created before a column existed.
   try { db.exec("ALTER TABLE claims ADD COLUMN failure_reason TEXT"); } catch { /* already present */ }
+  try { db.exec("ALTER TABLE quests ADD COLUMN reward_cap_inr INTEGER"); } catch { /* already present */ }
   return db;
 }
 

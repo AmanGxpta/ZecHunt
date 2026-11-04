@@ -336,3 +336,20 @@ test("reconciler flags stale PURCHASE_PENDING attempts but leaves fresh ones alo
   assert.equal(summary.flagged, 1);
   assert.equal(getClaimStatus(ctx.db, created.questId, "alice")?.claimStatus, "needs_reconciliation");
 });
+
+test("rupee caps convert to a USD-cent guard limit with margin; ₹50 can buy a ~$0.55 voucher", async () => {
+  const ctx = setup();
+  await assert.rejects(
+    createQuest(ctx.db, ctx.zcash, { title: "Rupee quest", clue: "c", rewardCategory: "food", rewardCapInr: 77 }),
+    (e: unknown) => e instanceof DomainError && e.code === "invalid_reward_cap",
+  );
+  const created = await createQuest(ctx.db, ctx.zcash, { title: "Rupee quest", clue: "c", rewardCategory: "food", rewardCapInr: 50 });
+  assert.equal(created.quest.rewardCapInr, 50);
+  assert.equal(created.quest.rewardCapCents, 63);
+  ctx.zcash.simulateFunding(created.quest.id, BigInt(1_000_000));
+  await syncFunding(ctx.db, ctx.zcash, created.quest.id, created.creatorToken);
+  const outcome = await winAs(ctx, created.quest.id, codeOf(ctx, created.quest.id), "alice");
+  assert.ok(!("error" in outcome));
+  assert.equal(outcome.purchase?.priceCents, 55);
+  assert.equal(outcome.purchase?.priceInr, 48);
+});

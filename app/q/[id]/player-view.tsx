@@ -1,16 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatUsd, ModeBadge, Shell, Spinner } from "@/components/ui";
+import { Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr, ModeBadge, Shell, Spinner } from "@/components/ui";
 
 type Mode = "mock" | "live";
 interface PublicQuest {
-  id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number;
+  id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number; rewardCapInr: number;
   status: "awaiting_funding" | "active" | "exhausted"; winnersRemaining: number; zcashMode: Mode;
 }
 interface ClaimView {
   claimId: string; claimStatus: string; reason?: string;
-  purchase: { productName: string; priceCents: number; state: string; invoiceId: string | null; providerMode: Mode } | null;
+  purchase: { productName: string; priceCents: number; priceInr: number; state: string; invoiceId: string | null; providerMode: Mode } | null;
 }
 
 const ERRORS: Record<string, string> = {
@@ -94,7 +94,7 @@ export default function PlayerView({ id }: { id: string }) {
         <Eyebrow>{claim ? "You won this quest" : quest.status === "active" ? "Quest is live" : quest.status === "exhausted" ? "Quest complete" : "Not live yet"}</Eyebrow>
         <h1 className="mt-2 font-display text-4xl leading-tight tracking-tight">{quest.title}</h1>
         <p className="mt-2 text-muted">
-          Reward: {CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatUsd(quest.rewardCapCents)}
+          Reward: {CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatInr(quest.rewardCapInr)}
         </p>
       </div>
 
@@ -165,7 +165,7 @@ function Victory({ claim, redemption }: { claim: ClaimView; redemption: string |
       {delivered && p ? (
         <div className="space-y-4">
           <p className="text-muted">
-            Your reward: <span className="text-fg">{p.productName}</span> ({formatUsd(p.priceCents)})
+            Your reward: <span className="text-fg">{p.productName}</span>{/₹/.test(p.productName) ? null : ` (about ${formatInr(p.priceInr)})`}
           </p>
           {redemption ? (
             <CopyField label={p.providerMode === "mock" ? "Redemption (SIMULATED, not a real code)" : "Your redemption code"} value={redemption} />
