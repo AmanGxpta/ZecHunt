@@ -1,9 +1,10 @@
 import { resolve } from "node:path";
 import { DomainError } from "../errors";
-import { approveOnePurchase, RestBitrefillAdapter } from "../bitrefill/adapter";
+import { ANY_CATALOG_PRODUCT, approveOnePurchase } from "../bitrefill/adapter";
+import { CatalogBitrefillBridge } from "../bitrefill/bridge";
 import { ZkoolZcashAdapter } from "../zcash/zkool";
 import { MockBitrefillAdapter, MockZcashAdapter } from "./mock";
-import type { BitrefillAdapter, Providers, ZcashAdapter } from "./types";
+import { PurchaseRejectedError, type BitrefillAdapter, type Providers, type ZcashAdapter } from "./types";
 
 export type ProviderMode = "mock" | "live";
 
@@ -44,21 +45,32 @@ function liveBitrefill(): BitrefillAdapter {
   const capCents = Math.min(500, Math.round(Number(process.env.BITREFILL_CREDIT_USD ?? "25") * 100));
   const dbPath = process.env.ZECHUNT_BITREFILL_DB ?? resolve(process.cwd(), ".data/bitrefill.db");
   const perPurchaseCapCents = Number(process.env.BITREFILL_PER_PURCHASE_CAP_CENTS ?? 55);
-  const adapter = new RestBitrefillAdapter({
+  // Catalog bridge: the India allowlist in lib/bitrefill/catalog.ts, live quotes, and the
+  // same guards as before (reprice, one-use approval, per-purchase/daily/total caps,
+  // one purchase per claim). Existing Swiggy claims keep their product id.
+  const bridge = new CatalogBitrefillBridge({
     apiKey,
     dbPath,
-    // Real balance spending needs this exact opt-in AND a human approval (scripts/bitrefill-approve.ts).
     livePurchases: process.env.ZECHUNT_LIVE_PURCHASES === "true",
-    accountPricesAreUsd: process.env.BITREFILL_ACCOUNT_PRICES_ARE_USD === "true",
     perPurchaseCapCents,
     dailyCapCents: Number(process.env.BITREFILL_DAILY_CAP_CENTS ?? 55),
     totalCapCents: Math.min(capCents, Number(process.env.BITREFILL_TOTAL_CAP_CENTS ?? 55)),
   });
   const live: BitrefillAdapter = {
-    searchEligibleProducts: (input) => adapter.searchEligibleProducts(input),
-    purchaseApprovedReward: (input) => adapter.purchaseApprovedReward(input),
-    getOrderStatus: (invoiceId) => adapter.getOrderStatus(invoiceId),
-    reconcilePurchase: (claimId) => adapter.reconcileReservedPurchase(claimId),
+    searchEligibleProducts: (input) => bridge.searchEligibleProducts(input),
+    async purchaseApprovedReward(input) {
+      try {
+        return await bridge.purchaseApprovedReward(input);
+      } catch (err) {
+        // Map the adapter's certain-refusal error onto the shared contract.
+        if (err instanceof Error && err.name === "BitrefillPurchaseRejected") {
+          throw new PurchaseRejectedError(String((err as { reasonCode?: unknown }).reasonCode ?? "rejected"));
+        }
+        throw err;
+      }
+    },
+    getOrderStatus: (invoiceId) => bridge.getOrderStatus(invoiceId),
+    reconcilePurchase: (claimId) => bridge.reconcilePurchase(claimId),
   };
   return process.env.ZECHUNT_BITREFILL_AUTO_APPROVE === "true"
     ? withPolicyApproval(live, dbPath, perPurchaseCapCents)
@@ -73,15 +85,24 @@ function liveBitrefill(): BitrefillAdapter {
  * claim, and the product spend guard still runs before any purchase.
  */
 function withPolicyApproval(inner: BitrefillAdapter, dbPath: string, perPurchaseCapCents: number): BitrefillAdapter {
+  // Searches happen on every reward-picker load (and per category), so keep at most one
+  // live approval per ceiling instead of minting one per search. A purchase consumes it.
+  const validUntil = new Map<number, number>();
+  const TTL = 2 * 60_000;
   return {
     async searchEligibleProducts(input) {
       const ceiling = Math.min(input.maxPriceCents, perPurchaseCapCents);
-      if (Number.isSafeInteger(ceiling) && ceiling > 0) {
-        approveOnePurchase(dbPath, ceiling, Date.now() + 2 * 60_000);
+      const now = Date.now();
+      if (Number.isSafeInteger(ceiling) && ceiling > 0 && (validUntil.get(ceiling) ?? 0) < now + 30_000) {
+        approveOnePurchase(dbPath, ceiling, now + TTL, ANY_CATALOG_PRODUCT);
+        validUntil.set(ceiling, now + TTL);
       }
       return inner.searchEligibleProducts(input);
     },
-    purchaseApprovedReward: (input) => inner.purchaseApprovedReward(input),
+    async purchaseApprovedReward(input) {
+      validUntil.clear();
+      return inner.purchaseApprovedReward(input);
+    },
     getOrderStatus: (invoiceId) => inner.getOrderStatus(invoiceId),
     reconcilePurchase: inner.reconcilePurchase && ((claimId) => inner.reconcilePurchase!(claimId)),
   };
