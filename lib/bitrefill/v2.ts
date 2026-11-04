@@ -439,19 +439,16 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
 
   /** Spend that may have happened: every attempt except provably refused ones (plus v1 when enabled). */
   private spentCents(): { all: number; today: number } {
-    const midnight = new Date().setUTCHours(0, 0, 0, 0);
-    const sum = (sql: string, ...args: number[]) => (this.db.prepare(sql).get(...args) as { cents: number }).cents;
-    let all = sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED'");
-    let today = sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED' AND created_at >= ?", midnight);
-    if (this.options.legacyV1Ledger && this.hasV1Ledger()) {
-      all += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_attempts");
-      today += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_attempts WHERE created_at >= ?", midnight);
-    }
-    return { all, today };
+    return readLedgerSpend(this.db, this.options.legacyV1Ledger === true);
   }
 
   private hasV1Ledger(): boolean {
-    return !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bitrefill_attempts'").get();
+    return hasTable(this.db, "bitrefill_attempts");
+  }
+
+  /** Read-only: spendable USD balance in cents, or null if it can't be read with certainty. */
+  getUsdBalanceCents(): Promise<number | null> {
+    return this.usdBalanceCents();
   }
 
   private productDetail(productId: string): Promise<ProductDetail> {
@@ -522,6 +519,31 @@ export class McpBitrefillAdapterV2 implements BitrefillAdapterV2 {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new McpError("unparseable_response");
     return parsed as T;
   }
+}
+
+function hasTable(db: DatabaseSync, name: string): boolean {
+  return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+}
+
+/**
+ * Spend counted against the daily (UTC) and total caps: every v2 attempt except provably
+ * refused ones, plus every v1 attempt when `includeV1`. Read-only; works on a read-only
+ * handle and on databases where either ledger table doesn't exist yet.
+ */
+export function readLedgerSpend(db: DatabaseSync, includeV1: boolean): { all: number; today: number } {
+  const midnight = new Date().setUTCHours(0, 0, 0, 0);
+  const sum = (sql: string, ...args: number[]) => (db.prepare(sql).get(...args) as { cents: number }).cents;
+  let all = 0;
+  let today = 0;
+  if (hasTable(db, "bitrefill_v2_attempts")) {
+    all += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED'");
+    today += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_v2_attempts WHERE state <> 'REFUSED' AND created_at >= ?", midnight);
+  }
+  if (includeV1 && hasTable(db, "bitrefill_attempts")) {
+    all += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_attempts");
+    today += sum("SELECT COALESCE(SUM(quoted_cents),0) AS cents FROM bitrefill_attempts WHERE created_at >= ?", midnight);
+  }
+  return { all, today };
 }
 
 /**

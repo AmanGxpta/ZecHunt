@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { FundingEvent, ZcashAdapter } from "../providers/types";
@@ -49,6 +49,22 @@ export function zecToZatoshis(value: string): bigint {
   const match = value.match(/^(\d+)(?:\.(\d{1,8}))?$/);
   if (!match) throw new Error("Invalid ZEC amount from zkool");
   return BigInt(match[1]) * 100_000_000n + BigInt((match[2] ?? "").padEnd(8, "0"));
+}
+
+/**
+ * Read-only: when the last completed funding scan finished (epoch ms), from a mapping DB.
+ * null if the file, the table or a scan doesn't exist yet. Never creates or writes anything.
+ */
+export function readLastScanAt(mappingDbPath: string): number | null {
+  if (!existsSync(mappingDbPath)) return null;
+  const db = new DatabaseSync(mappingDbPath, { readOnly: true });
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'zcash_watcher_state'").get()) return null;
+    const row = db.prepare("SELECT last_scan_at FROM zcash_watcher_state WHERE id = 1").get() as { last_scan_at: number } | undefined;
+    return row?.last_scan_at ?? null;
+  } finally {
+    db.close();
+  }
 }
 
 /**
