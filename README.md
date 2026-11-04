@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Zechunt
 
-## Getting Started
+Hide a real reward behind a real-world challenge. A creator funds a quest with shielded Zcash testnet funds, shares the link and a checkpoint code, and the first verified player receives a Bitrefill reward.
 
-First, run the development server:
+Status: **MVP in progress.** The application flow runs end to end against mock providers. Live Zcash and Bitrefill adapters are not implemented yet.
+
+## Run it
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+cp .env.example .env.local   # then set ZECHUNT_SECRET
+npm run dev                  # http://localhost:3000
+npm test                     # domain tests (node:test + tsx)
+npm run typecheck
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Status: what is real and what is mocked
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Capability | Status |
+| --- | --- |
+| Quest creation, funding activation, checkpoint, single-winner claim | Implemented, tested (`tests/quests.test.ts`) |
+| Spend guard (cap, credit, category, duplicate) | Implemented, unit-tested |
+| Restart-safe purchase state, no blind retries, reconciliation | Implemented, tested |
+| Zcash funding detection | **Mock only.** `lib/providers/mock.ts` |
+| Bitrefill catalog and purchase | **Mock only.** `lib/providers/mock.ts` |
+| Live Zcash NU7 testnet adapter | Not implemented (`ZECHUNT_PROVIDER_MODE=live` returns 501) |
+| Live Bitrefill MCP/API adapter | Not implemented |
+| Agent-based product selection | Deterministic selection only (`lib/providers/select.ts`); the guard still decides |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Every mock result is labelled in the API (`providerMode`) and in the UI. A mock is never presented as a real transaction or purchase.
 
-## Learn More
+## Architecture
 
-To learn more about Next.js, take a look at the following resources:
+- `lib/quests/service.ts`: quest state machine, funding sync, checkpoint verification, atomic claim, guarded fulfillment, reconciliation.
+- `lib/policy/spend-guard.ts`: the only code path that can approve a purchase.
+- `lib/providers/`: adapter contracts (`types.ts`) and mock implementations.
+- `lib/db.ts`: SQLite (`node:sqlite`). Money is stored as integers: zatoshis and cents.
+- `app/api/quests/...`: HTTP routes. Sensitive checks run on the server only.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Security properties enforced by the code and tests:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- Creator token and checkpoint code are stored only as keyed HMACs. Both are shown once.
+- Checkpoint codes lock out after 10 wrong attempts.
+- Claim tokens are single-use, expire after 10 minutes, and are bound to the player session.
+- Exactly one winner per quest, enforced in one `BEGIN IMMEDIATE` transaction.
+- An output of a shielded transaction can fund a quest only once (primary key on the output id).
+- A purchase intent is persisted before the Bitrefill call. A failed call is marked for reconciliation, never retried.
 
-## Deploy on Vercel
+## Privacy and trust note (draft)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **What stays private:** on the Zcash side, funding amounts, sender and receiver addresses, and memos are shielded on-chain. Quest creators and winners need no public wallet history.
+- **What the app reveals, and to whom:** the server stores quest titles, clues, reward categories, and claim timing. The server sees player session IDs (anonymous cookies) and the creator's funding address. The reward category and cap are public by design.
+- **What users must trust:** the operator's server (it holds the checkpoint secret and the claim logic); the Zcash testnet wallet/viewing-key service for funding detection; Bitrefill for fulfilment; the Bitrefill credit owner for spending limits.
+- **Known gaps:** the checkpoint is a shared six-digit code, not location proof. Redemption data is fetched live and not stored, but there is no encryption-at-rest for invoice records yet. The custody model is custodial and must not be described as trustless.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Next steps
+
+1. Live Zcash adapter: detect a real shielded testnet deposit to a per-quest address.
+2. Live Bitrefill adapter: catalog search and `buy-products` with test products first.
+3. Demo video and public URL.
