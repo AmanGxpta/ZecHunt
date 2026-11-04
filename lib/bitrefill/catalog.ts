@@ -15,6 +15,7 @@
 //    total caps still apply (currently $0.55 / $0.55 / $0.55).
 
 import type { Money } from "../providers/v2";
+import { catalogLogoUrl } from "./logos";
 
 export const CATALOG_CATEGORIES = ["food", "shopping", "gaming"] as const;
 export type CatalogCategory = (typeof CATALOG_CATEGORIES)[number];
@@ -31,6 +32,8 @@ export interface CatalogEntry {
   faceValue: Money;
   /** USD price observed on 4 Nov 2026. Evidence only; never used to authorize spend. */
   recordedUsdCents: number;
+  /** Brand logo on cdn.bitrefill.com (https only), from ./logos.generated.ts; absent if none. */
+  imageUrl?: string;
 }
 
 type Row = [productId: string, brand: string, category: CatalogCategory, packageInr: number, recordedUsdCents: number];
@@ -79,6 +82,7 @@ export const REWARD_CATALOG: readonly CatalogEntry[] = Object.freeze(ROWS.map(([
   Object.freeze({
     productId, packageValue: String(inr), category, country: "IN" as const, brand,
     faceValue: { amountMinor: inr * 100, currency: "INR" as const }, recordedUsdCents: cents,
+    ...(catalogLogoUrl(productId) ? { imageUrl: catalogLogoUrl(productId) } : {}),
   })));
 
 /** v1 product id ("<productId>:<packageValue>"); "swiggy-money-india:50" matches the v1 REWARD_ID. */

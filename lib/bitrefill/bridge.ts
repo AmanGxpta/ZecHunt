@@ -13,7 +13,8 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { PurchaseRejectedError, type BitrefillAdapter, type PurchaseOrderStatus, type RewardProduct } from "../providers/types";
 import { ANY_CATALOG_PRODUCT, initializeV1Ledger, RestBitrefillAdapter } from "./adapter";
-import { catalogKey, findByCatalogKey, REWARD_CATALOG, type CatalogEntry } from "./catalog";
+import { catalogKey, findByCatalogKey, findCatalogEntry, REWARD_CATALOG, type CatalogEntry } from "./catalog";
+import { safeLogoUrl } from "./logos";
 import { McpBitrefillAdapterV2 } from "./v2";
 
 export interface CatalogBitrefillBridgeOptions {
@@ -100,7 +101,9 @@ export class CatalogBitrefillBridge implements BitrefillAdapter {
       .map((q): RewardProduct => ({ productId: catalogKey(q), name: q.title, category: q.category,
         priceCents: q.quotedPrice.amountMinor,
         // CR-4: only when the provider stated it (v2 quote drops a face value that disagrees with the catalog).
-        ...(q.faceValue ? { faceValue: { amountMinor: q.faceValue.amountMinor, currency: q.faceValue.currency } } : {}) }));
+        ...(q.faceValue ? { faceValue: { amountMinor: q.faceValue.amountMinor, currency: q.faceValue.currency } } : {}),
+        // Logo from the stored catalog (no extra call), re-validated: https on Bitrefill's image host only.
+        ...logoFor(this.catalog, q.productId, q.packageValue) }));
   }
 
   async purchaseApprovedReward(input: { claimId: string; productId: string; expectedMaxPriceCents: number }): Promise<{ invoiceId: string; status: string }> {
@@ -212,6 +215,11 @@ export class CatalogBitrefillBridge implements BitrefillAdapter {
       throw error;
     }
   }
+}
+
+function logoFor(catalog: readonly CatalogEntry[], productId: string, packageValue: string): { imageUrl?: string } {
+  const url = safeLogoUrl(findCatalogEntry(productId, packageValue, catalog)?.imageUrl);
+  return url ? { imageUrl: url } : {};
 }
 
 function attemptIdFor(claimId: string): string {
