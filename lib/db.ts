@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS claims (
   quest_id        TEXT NOT NULL REFERENCES quests(id),
   player_session  TEXT NOT NULL,
   status          TEXT NOT NULL CHECK (status IN ('reserved','purchase_pending','delivered','needs_reconciliation','failed')),
+  failure_reason  TEXT,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL,
   UNIQUE (quest_id, player_session)
@@ -87,6 +88,8 @@ export function openDatabase(path: string): DatabaseSync {
   const db = new DatabaseSync(path);
   if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL;");
   db.exec(SCHEMA_SQL);
+  // Additive migrations for databases created before a column existed.
+  try { db.exec("ALTER TABLE claims ADD COLUMN failure_reason TEXT"); } catch { /* already present */ }
   return db;
 }
 

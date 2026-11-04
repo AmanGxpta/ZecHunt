@@ -91,7 +91,7 @@ export default function PlayerView({ id }: { id: string }) {
   return (
     <Shell>
       <div className="rise">
-        <Eyebrow>{quest.status === "active" ? "Quest is live" : quest.status === "exhausted" ? "Quest complete" : "Not live yet"}</Eyebrow>
+        <Eyebrow>{claim ? "You won this quest" : quest.status === "active" ? "Quest is live" : quest.status === "exhausted" ? "Quest complete" : "Not live yet"}</Eyebrow>
         <h1 className="mt-2 font-display text-4xl leading-tight tracking-tight">{quest.title}</h1>
         <p className="mt-2 text-muted">
           Reward: {CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatUsd(quest.rewardCapCents)}
@@ -144,6 +144,14 @@ export default function PlayerView({ id }: { id: string }) {
   );
 }
 
+const REASONS: Record<string, string> = {
+  no_eligible_product: "no in-stock product fits this quest’s budget",
+  over_reward_cap: "the price is above the creator’s cap",
+  insufficient_credit: "the reward budget is used up",
+  category_mismatch: "the product didn’t match the reward type",
+  quest_not_funded: "the quest isn’t funded",
+};
+
 function Victory({ claim, redemption }: { claim: ClaimView; redemption: string | null }) {
   const p = claim.purchase;
   const delivered = claim.claimStatus === "delivered";
@@ -171,7 +179,10 @@ function Victory({ claim, redemption }: { claim: ClaimView; redemption: string |
       ) : claim.claimStatus === "needs_reconciliation" ? (
         <p className="text-muted">Your win is recorded. The purchase needs a manual check before anything is retried. We won’t charge twice. Check back soon.</p>
       ) : (
-        <p className="text-muted">Your win is recorded, but no eligible reward could be bought ({claim.reason ?? "unavailable"}). The organiser has been flagged.</p>
+        <p className="text-muted">
+          Your win is recorded, but no reward could be bought:{" "}
+          <span className="text-fg">{REASONS[claim.reason ?? ""] ?? claim.reason ?? "unknown reason"}</span>. No money was spent. The organiser has been flagged.
+        </p>
       )}
     </Card>
   );

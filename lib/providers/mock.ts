@@ -37,6 +37,9 @@ export class MockZcashAdapter implements ZcashAdapter {
 }
 
 const MOCK_CATALOG: RewardProduct[] = [
+  { productId: "mock-food-055", name: "Mock food voucher ₹50", category: "food", priceCents: 55 },
+  { productId: "mock-mobile-1", name: "Mock mobile top-up $1", category: "mobile-recharge", priceCents: 100 },
+  { productId: "mock-gaming-1", name: "Mock gaming credit $1", category: "gaming", priceCents: 100 },
   { productId: "mock-food-3", name: "Mock food voucher $3", category: "food", priceCents: 300 },
   { productId: "mock-food-5", name: "Mock food voucher $5", category: "food", priceCents: 500 },
   { productId: "mock-mobile-5", name: "Mock mobile top-up $5", category: "mobile-recharge", priceCents: 500 },

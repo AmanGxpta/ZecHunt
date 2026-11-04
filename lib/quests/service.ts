@@ -490,7 +490,7 @@ export async function fulfillClaim(
       return { ok: false as const, reason: "duplicate_purchase", keepState: true };
     }
     if (!product) {
-      db.prepare("UPDATE claims SET status = 'failed', updated_at = ? WHERE id = ?").run(now, claimId);
+      db.prepare("UPDATE claims SET status = 'failed', failure_reason = 'no_eligible_product', updated_at = ? WHERE id = ?").run(now, claimId);
       return { ok: false as const, reason: "no_eligible_product" };
     }
     const guard = checkSpend({
@@ -504,7 +504,7 @@ export async function fulfillClaim(
       creditRemainingCents: credit - reservedCents(db),
     });
     if (!guard.ok) {
-      db.prepare("UPDATE claims SET status = 'failed', updated_at = ? WHERE id = ?").run(now, claimId);
+      db.prepare("UPDATE claims SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?").run(guard.reason, now, claimId);
       return { ok: false as const, reason: guard.reason };
     }
     db.prepare(
@@ -563,14 +563,13 @@ async function refreshOrderStatus(db: DatabaseSync, bitrefill: BitrefillAdapter,
 }
 
 function markNeedsReconciliation(db: DatabaseSync, claimId: string, reason: string): void {
-  void reason;
   const now = Date.now();
   db.prepare("UPDATE purchase_attempts SET state = 'NEEDS_RECONCILIATION', updated_at = ? WHERE claim_id = ?").run(now, claimId);
-  db.prepare("UPDATE claims SET status = 'needs_reconciliation', updated_at = ? WHERE id = ?").run(now, claimId);
+  db.prepare("UPDATE claims SET status = 'needs_reconciliation', failure_reason = ?, updated_at = ? WHERE id = ?").run(reason, now, claimId);
 }
 
 function loadOutcome(db: DatabaseSync, claimId: string, reason?: string): ClaimOutcome {
-  const claim = db.prepare("SELECT * FROM claims WHERE id = ?").get(claimId) as unknown as ClaimRow;
+  const claim = db.prepare("SELECT * FROM claims WHERE id = ?").get(claimId) as unknown as ClaimRow & { failure_reason: string | null };
   const attempt = db.prepare("SELECT * FROM purchase_attempts WHERE claim_id = ?").get(claimId) as AttemptRow | undefined;
   return {
     claimId,
@@ -584,7 +583,7 @@ function loadOutcome(db: DatabaseSync, claimId: string, reason?: string): ClaimO
           providerMode: attempt.provider_mode,
         }
       : null,
-    reason,
+    reason: reason ?? claim.failure_reason ?? undefined,
   };
 }
 

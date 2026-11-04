@@ -51,6 +51,7 @@ export default function CheckpointView({ id }: { id: string }) {
           ) : code.status !== "active" ? (
             <p className="max-w-sm text-lg text-muted">Waiting for the quest to be funded. The code will work once it’s live.</p>
           ) : null}
+          {code.status === "active" && (<>
           <div className="relative">
             <svg width="300" height="300" viewBox="0 0 100 100" className="-rotate-90" aria-hidden>
               <circle cx="50" cy="50" r="46" fill="none" stroke="var(--line)" strokeWidth="2" />
@@ -67,6 +68,7 @@ export default function CheckpointView({ id }: { id: string }) {
           <p className="max-w-sm text-sm leading-6 text-muted">
             Show this to players who reach you. They type it into the quest page. The first one to do it wins.
           </p>
+          </>)}
         </>
       )}
     </main>
