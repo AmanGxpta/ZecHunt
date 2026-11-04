@@ -5,14 +5,14 @@ import { useState } from "react";
 import { Button, Card, CATEGORY_LABEL, ErrorNote, Eyebrow, Shell, Spinner } from "@/components/ui";
 import { saveSecrets } from "@/lib/client/creator-store";
 
-const CATEGORIES = ["food", "mobile-recharge", "gaming"] as const;
+const CATEGORIES = ["any", "food", "shopping", "gaming"] as const;
 const CAPS = [50, 100, 250, 400];
 
 export default function CreatePage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [clue, setClue] = useState("");
-  const [category, setCategory] = useState<string>("food");
+  const [category, setCategory] = useState<string>("any");
   const [cap, setCap] = useState(50);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +66,7 @@ export default function CreatePage() {
         <Card className="space-y-5">
           <div>
             <p className="text-sm font-medium">Reward</p>
-            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <div className="mt-3 grid grid-cols-2 gap-2">
               {CATEGORIES.map((c) => (
                 <button key={c} type="button" onClick={() => setCategory(c)} aria-pressed={category === c}
                   className={`rounded-xl border px-3 py-3 text-left text-sm transition ${category === c ? "border-lantern bg-lantern/10 text-fg" : "border-line text-muted hover:border-lantern/40"}`}>
@@ -74,6 +74,11 @@ export default function CreatePage() {
                 </button>
               ))}
             </div>
+            <p className="mt-2 text-xs text-muted">
+              {category === "any"
+                ? "The winner picks a food, shopping or gaming voucher. Our agent suggests one; they confirm."
+                : "The winner picks from vouchers in this category. Our agent suggests one; they confirm."}
+            </p>
           </div>
           <div>
             <p className="text-sm font-medium">Most the agent may spend</p>

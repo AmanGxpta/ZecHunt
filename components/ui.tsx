@@ -115,7 +115,9 @@ export function formatTaz(zatoshis: number) {
 }
 
 export const CATEGORY_LABEL: Record<string, string> = {
+  any: "Winner’s choice",
   food: "Food & drink voucher",
+  shopping: "Shopping voucher",
   "mobile-recharge": "Mobile recharge",
   gaming: "Gaming credit",
 };

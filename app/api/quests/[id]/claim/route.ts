@@ -3,9 +3,10 @@ import { errorResponse, playerSession, readJson, withPlayerCookie } from "@/lib/
 import { getDb } from "@/lib/db";
 import { DomainError } from "@/lib/errors";
 import { getProviders } from "@/lib/providers";
-import { fulfillClaim, getClaimStatus, reserveWinnerSlot } from "@/lib/quests/service";
+import { getClaimStatus, reserveWinnerSlot } from "@/lib/quests/service";
 
-// Consumes the claim token, reserves the single winner slot, then runs guarded fulfillment.
+// Consumes the claim token and reserves the winner slot. The winner then picks a
+// reward via /rewards, which runs guarded fulfillment.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const session = playerSession(req);
   try {
@@ -20,9 +21,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const status = reserved.error === "quest_exhausted" || reserved.error === "already_claimed" ? 409 : 400;
       return withPlayerCookie(NextResponse.json({ error: reserved.error }, { status }), session);
     }
-    const { bitrefill, modes } = getProviders();
-    const outcome = await fulfillClaim(db, bitrefill, reserved.claimId, { bitrefillMode: modes.bitrefill });
-    return withPlayerCookie(NextResponse.json(outcome, { status: 200 }), session);
+    return withPlayerCookie(NextResponse.json(getClaimStatus(db, id, session.id), { status: 200 }), session);
   } catch (err) {
     return withPlayerCookie(errorResponse(err), session);
   }

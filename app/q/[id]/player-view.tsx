@@ -53,7 +53,7 @@ export default function PlayerView({ id }: { id: string }) {
     // Keep polling while there's something to wait for: activation or fulfillment.
     const t = setInterval(() => {
       const c = claimRef.current;
-      if (!c || ["purchase_pending", "reserved"].includes(c.claimStatus) || c.purchase?.state === "INVOICE_CREATED") load();
+      if (!c || c.claimStatus === "purchase_pending" || c.purchase?.state === "INVOICE_CREATED") load();
     }, 4_000);
     return () => { alive = false; clearInterval(t); };
   }, [id]);
@@ -94,7 +94,7 @@ export default function PlayerView({ id }: { id: string }) {
         <Eyebrow>{claim ? "You won this quest" : quest.status === "active" ? "Quest is live" : quest.status === "exhausted" ? "Quest complete" : "Not live yet"}</Eyebrow>
         <h1 className="mt-2 font-display text-4xl leading-tight tracking-tight">{quest.title}</h1>
         <p className="mt-2 text-muted">
-          Reward: {CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatInr(quest.rewardCapInr)}
+          Reward: {quest.rewardCategory === "any" ? "a voucher of the winner’s choice" : CATEGORY_LABEL[quest.rewardCategory] ?? quest.rewardCategory}, worth up to {formatInr(quest.rewardCapInr)}
         </p>
       </div>
 
@@ -104,7 +104,9 @@ export default function PlayerView({ id }: { id: string }) {
       </Card>
 
       {claim ? (
-        <Victory claim={claim} redemption={redemption} />
+        claim.claimStatus === "reserved"
+          ? <RewardPicker questId={id} onChosen={(c) => { claimRef.current = c; setClaim(c); }} />
+          : <Victory claim={claim} redemption={redemption} />
       ) : quest.status === "active" ? (
         <form onSubmit={submit} className="mt-4">
           <Card className="space-y-4">
@@ -183,6 +185,120 @@ function Victory({ claim, redemption }: { claim: ClaimView; redemption: string |
           Your win is recorded, but no reward could be bought:{" "}
           <span className="text-fg">{REASONS[claim.reason ?? ""] ?? claim.reason ?? "unknown reason"}</span>. No money was spent. The organiser has been flagged.
         </p>
+      )}
+    </Card>
+  );
+}
+
+interface RewardOption { productId: string; name: string; category: string; priceCents: number; priceInr: number }
+interface Recommendation { productId: string; reason: string; source: "agent" | "rule" }
+
+interface RewardsResponse {
+  options?: RewardOption[]; recommendation?: Recommendation | null; error?: string; message?: string;
+}
+
+async function fetchRewards(questId: string): Promise<{ ok: boolean; data: RewardsResponse }> {
+  try {
+    const r = await fetch(`/api/quests/${questId}/rewards`);
+    return { ok: r.ok, data: await r.json() };
+  } catch {
+    return { ok: false, data: { message: "Couldn’t load rewards. Check your connection." } };
+  }
+}
+
+const PICK_ERRORS: Record<string, string> = {
+  reward_unavailable: "That one just went out of stock or changed price. Pick another.",
+  reward_already_chosen: "Your reward is already on its way.",
+};
+
+function RewardPicker({ questId, onChosen }: { questId: string; onChosen: (c: ClaimView) => void }) {
+  const [options, setOptions] = useState<RewardOption[] | null>(null);
+  const [rec, setRec] = useState<Recommendation | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function apply(d: { ok: boolean; data: RewardsResponse }) {
+    if (!d.ok) {
+      if (d.data.error === "reward_already_chosen") { refreshClaim(); return; }
+      setError(d.data.message ?? "Couldn’t load rewards");
+      return;
+    }
+    setError(null); setOptions(d.data.options ?? []); setRec(d.data.recommendation ?? null);
+    setSelected((s) => s ?? d.data.recommendation?.productId ?? d.data.options?.[0]?.productId ?? null);
+  }
+
+  async function loadOptions() {
+    apply(await fetchRewards(questId));
+  }
+
+  async function refreshClaim() {
+    const again = await fetch(`/api/quests/${questId}/claim`).then((r) => r.json()).catch(() => null);
+    if (again?.claim) onChosen(again.claim);
+  }
+
+  useEffect(() => {
+    let alive = true;
+    fetchRewards(questId).then((d) => { if (alive) apply(d); });
+    return () => { alive = false; };
+  }, [questId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function confirm() {
+    if (!selected) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await fetch(`/api/quests/${questId}/rewards`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ productId: selected }),
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        if (d.error === "reward_unavailable") { setSelected(null); await loadOptions(); }
+        throw new Error(PICK_ERRORS[d.error] ?? d.message ?? "Something went wrong");
+      }
+      onChosen(d);
+      await refreshClaim();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="mt-4 overflow-hidden border-lantern/40">
+      <div className="-m-5 mb-5 bg-gradient-to-br from-lantern/25 via-lantern/5 to-transparent px-5 py-6">
+        <p className="text-[11px] uppercase tracking-[0.22em] text-lantern">You found it</p>
+        <p className="mt-1 font-display text-3xl">First to the checkpoint 🏆</p>
+        <p className="mt-2 text-sm text-muted">Pick your reward. Nothing is bought until you confirm.</p>
+      </div>
+      {!options ? (
+        error ? <ErrorNote>{error}</ErrorNote> : <p className="flex items-center gap-2 text-muted"><Spinner /> Finding rewards in stock…</p>
+      ) : options.length === 0 ? (
+        <p className="text-muted">No reward fits this quest’s budget right now. Your win is saved; check back in a bit.</p>
+      ) : (
+        <div className="space-y-3">
+          <div className="space-y-2" role="radiogroup" aria-label="Rewards">
+            {options.map((o) => {
+              const on = selected === o.productId;
+              const recommended = rec?.productId === o.productId;
+              return (
+                <button key={o.productId} type="button" role="radio" aria-checked={on} onClick={() => setSelected(o.productId)}
+                  className={`w-full rounded-xl border px-4 py-3 text-left transition ${on ? "border-lantern bg-lantern/10" : "border-line hover:border-lantern/40"}`}>
+                  <span className="flex items-center justify-between gap-3">
+                    <span className="font-medium text-fg">{o.name}</span>
+                    {recommended && <span className="shrink-0 rounded-full bg-lantern/15 px-2 py-0.5 text-[11px] uppercase tracking-[0.14em] text-lantern">Suggested</span>}
+                  </span>
+                  <span className="mt-0.5 block text-xs text-muted">{CATEGORY_LABEL[o.category] ?? o.category}</span>
+                  {recommended && rec?.reason && <span className="mt-2 block text-sm text-muted">“{rec.reason}”</span>}
+                </button>
+              );
+            })}
+          </div>
+          {error && <ErrorNote>{error}</ErrorNote>}
+          <Button onClick={confirm} disabled={busy || !selected} className="w-full">
+            {busy ? <><Spinner /> Getting your reward…</> : "Get this reward"}
+          </Button>
+        </div>
       )}
     </Card>
   );
