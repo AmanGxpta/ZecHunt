@@ -35,7 +35,9 @@ export default function Home() {
           <Link href="/create" className="inline-flex min-h-12 items-center justify-center rounded-xl bg-lantern px-6 font-semibold text-ink transition hover:brightness-110">
             Hide a reward →
           </Link>
-          <p className="text-sm text-muted">Got a quest link? Just open it.</p>
+          <Link href="/demo" className="inline-flex min-h-12 items-center justify-center rounded-xl border border-line px-6 font-semibold transition hover:border-lantern/60">
+            ▶ Watch the demo
+          </Link>
         </div>
       </section>
 
