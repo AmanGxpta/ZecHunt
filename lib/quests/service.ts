@@ -10,7 +10,7 @@ import {
 import { checkSpend } from "../policy/spend-guard";
 import { currentCode, verifyCode } from "./checkpoint";
 import { centsToInr, INR_CAPS, inrCapToCents } from "../money";
-import type { BitrefillAdapter, RewardProduct, ZcashAdapter } from "../providers/types";
+import { PurchaseRejectedError, type BitrefillAdapter, type RewardProduct, type ZcashAdapter } from "../providers/types";
 import { recommendReward, type Recommendation } from "../agent/recommend";
 import { selectReward } from "../providers/select";
 
@@ -26,7 +26,7 @@ export type ProviderMode = "mock" | "live";
 /** Test-network activation threshold: 0.01 TAZ. Not an exchange rate. */
 export const DEFAULT_EXPECTED_ZATOSHIS = 1_000_000;
 export const MAX_REWARD_CAP_CENTS = 500;
-export const REWARD_CATEGORIES = ["food", "shopping", "gaming", "mobile-recharge"] as const;
+export const REWARD_CATEGORIES = ["food", "shopping", "gaming"] as const;
 export type RewardCategory = (typeof REWARD_CATEGORIES)[number];
 /** Creator lets the winner pick from every supported category. */
 export const ANY_CATEGORY = "any";
@@ -558,6 +558,13 @@ export async function fulfillClaim(
       claimId,
     );
   } catch (err) {
+    if (err instanceof PurchaseRejectedError) {
+      // Certain no charge: fail the claim cleanly instead of freezing it for reconciliation.
+      const t = Date.now();
+      db.prepare("UPDATE purchase_attempts SET state = 'FAILED', updated_at = ? WHERE claim_id = ?").run(t, claimId);
+      db.prepare("UPDATE claims SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?").run(err.reasonCode, t, claimId);
+      return loadOutcome(db, claimId, err.reasonCode);
+    }
     // Message only: adapters must never put credentials or redemption data in errors.
     console.error(`[fulfillment] claim ${claimId} purchase uncertain:`, err instanceof Error ? err.message : String(err));
     markNeedsReconciliation(db, claimId, "purchase_call_failed");
@@ -688,6 +695,8 @@ export interface RewardOption {
   category: string;
   priceCents: number;
   priceInr: number;
+  /** Face value in rupees when the provider states it, else an estimate from the price. */
+  faceInr: number;
 }
 
 /** The caller's claim on this quest if it is still waiting for a reward choice. */
@@ -710,6 +719,7 @@ export async function listRewardOptions(
   const q = loadQuest(db, questId);
   const options = (await eligibleProducts(bitrefill, q)).map((p) => ({
     productId: p.productId, name: p.name, category: p.category, priceCents: p.priceCents, priceInr: centsToInr(p.priceCents),
+    faceInr: p.faceValue?.currency === "INR" ? Math.round(p.faceValue.amountMinor / 100) : centsToInr(p.priceCents),
   }));
   const recommendation = await recommendReward(options, { capCents: q.reward_cap_cents, questTitle: q.title });
   return { claimId, options, recommendation };

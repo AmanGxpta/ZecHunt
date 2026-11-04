@@ -152,6 +152,11 @@ const REASONS: Record<string, string> = {
   insufficient_credit: "the reward budget is used up",
   category_mismatch: "the product didn’t match the reward type",
   quest_not_funded: "the quest isn’t funded",
+  repriced_over_cap: "its price went above the creator’s cap just before buying",
+  unavailable: "it went out of stock just before buying",
+  no_approval: "the purchase wasn’t approved in time",
+  spend_ceiling_reached: "today’s reward budget is used up",
+  insufficient_balance: "the reward balance is empty",
 };
 
 function Victory({ claim, redemption }: { claim: ClaimView; redemption: string | null }) {

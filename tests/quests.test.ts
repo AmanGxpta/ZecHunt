@@ -6,7 +6,7 @@ import { openDatabase } from "../lib/db";
 process.env.ZECHUNT_AGENT = "off";
 import { DomainError } from "../lib/errors";
 import { MockBitrefillAdapter, MockZcashAdapter } from "../lib/providers/mock";
-import type { BitrefillAdapter } from "../lib/providers/types";
+import { PurchaseRejectedError, type BitrefillAdapter } from "../lib/providers/types";
 import { checkSpend } from "../lib/policy/spend-guard";
 import {
   createQuest,
@@ -408,4 +408,22 @@ test("the winner picks a reward: options span winner's-choice categories, a forg
   const outcome = await fulfillClaim(ctx.db, ctx.bitrefill, r.claimId, { productId: pick.productId });
   assert.equal(outcome.purchase?.productName, pick.name);
   assert.equal(outcome.claimStatus, "delivered");
+});
+
+test("a certain refusal (no charge) fails the claim cleanly instead of freezing it", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx);
+  const refusing: BitrefillAdapter = {
+    searchEligibleProducts: (input) => ctx.bitrefill.searchEligibleProducts(input),
+    async purchaseApprovedReward() { throw new PurchaseRejectedError("repriced_over_cap"); },
+    getOrderStatus: (id) => ctx.bitrefill.getOrderStatus(id),
+  };
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
+  const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
+  assert.ok("claimId" in r);
+  const outcome = await fulfillClaim(ctx.db, refusing, r.claimId);
+  assert.equal(outcome.claimStatus, "failed");
+  assert.equal(outcome.reason, "repriced_over_cap");
+  const { options } = await listRewardOptions(ctx.db, ctx.bitrefill, created.questId, "bob").catch(() => ({ options: [] }));
+  assert.equal(options.length, 0);
 });
