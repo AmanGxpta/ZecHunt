@@ -111,8 +111,8 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
 
   close(): void { this.db.close(); }
 
-  async searchEligibleProducts(input: { category: string; maxPriceCents: number }): Promise<RewardProduct[]> {
-    if (input.category !== "food") return [];
+  async searchEligibleProducts(input: { country: string; category: string; maxPriceCents: number }): Promise<RewardProduct[]> {
+    if (input.country !== "IN" || input.category !== "food") return [];
     const product = await this.getProduct();
     const priceCents = packagePrice(product, this.options.accountPricesAreUsd === true);
     if (priceCents > input.maxPriceCents || priceCents > (this.options.perPurchaseCapCents ?? 500)) return [];
