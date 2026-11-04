@@ -91,6 +91,9 @@ export function openDatabase(path: string): DatabaseSync {
   // Additive migrations for databases created before a column existed.
   try { db.exec("ALTER TABLE claims ADD COLUMN failure_reason TEXT"); } catch { /* already present */ }
   try { db.exec("ALTER TABLE quests ADD COLUMN reward_cap_inr INTEGER"); } catch { /* already present */ }
+  // Creator controls. Kept as timestamps so the original status CHECK needs no table rebuild.
+  try { db.exec("ALTER TABLE quests ADD COLUMN paused_at INTEGER"); } catch { /* already present */ }
+  try { db.exec("ALTER TABLE quests ADD COLUMN cancelled_at INTEGER"); } catch { /* already present */ }
   return db;
 }
 

@@ -13,6 +13,7 @@ import {
   fulfillClaim,
   getClaimStatus,
   listRewardOptions,
+  controlQuest,
   CHECKPOINT_LIMITS,
   getCheckpointCode,
   reconcileFulfillments,
@@ -426,4 +427,27 @@ test("a certain refusal (no charge) fails the claim cleanly instead of freezing 
   assert.equal(outcome.reason, "repriced_over_cap");
   const { options } = await listRewardOptions(ctx.db, ctx.bitrefill, created.questId, "bob").catch(() => ({ options: [] }));
   assert.equal(options.length, 0);
+});
+
+test("creator controls: pause blocks claims, resume restores them, cancel only before a winner", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx);
+  const id = created.questId;
+  await assert.rejects(async () => controlQuest(ctx.db, id, "wrong-token", "pause"),
+    (e: unknown) => e instanceof DomainError && e.code === "forbidden");
+  assert.equal(controlQuest(ctx.db, id, created.creatorToken, "pause").status, "paused");
+  assert.throws(() => submitCheckpoint(ctx.db, id, codeOf(ctx, id), "alice"),
+    (e: unknown) => e instanceof DomainError && e.code === "quest_paused");
+  assert.equal(controlQuest(ctx.db, id, created.creatorToken, "resume").status, "active");
+  const won = await winAs(ctx, id, codeOf(ctx, id), "alice");
+  assert.ok(!("error" in won));
+  assert.throws(() => controlQuest(ctx.db, id, created.creatorToken, "cancel"),
+    (e: unknown) => e instanceof DomainError && e.code === "cannot_cancel");
+
+  const other = await fundedQuest(ctx);
+  assert.equal(controlQuest(ctx.db, other.questId, other.creatorToken, "cancel").status, "cancelled");
+  assert.throws(() => submitCheckpoint(ctx.db, other.questId, codeOf(ctx, other.questId), "bob"),
+    (e: unknown) => e instanceof DomainError && e.code === "quest_cancelled");
+  assert.throws(() => controlQuest(ctx.db, other.questId, other.creatorToken, "resume"),
+    (e: unknown) => e instanceof DomainError && e.code === "cannot_resume");
 });
