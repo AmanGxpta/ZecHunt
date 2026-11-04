@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Lets phones on the same Wi-Fi load dev assets (two-device testing).
+  // e.g. ZECHUNT_DEV_ORIGINS=192.168.1.11
+  allowedDevOrigins: (process.env.ZECHUNT_DEV_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   experimental: {
     agentFeedback: true,
   },
