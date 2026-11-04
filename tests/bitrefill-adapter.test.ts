@@ -116,7 +116,7 @@ test("a reserved attempt adopts exactly one later product invoice without anothe
     if (name === "list-invoices") return mcpResult({ invoices: listed, count: listed.length });
     if (name === "get-invoice-by-id") {
       const invoice = listed.find((item) => (item as { invoice_id: string }).invoice_id === "correct-invoice") as { created_time: string };
-      return mcpResult(matchingDetail("correct-invoice", invoice.created_time));
+      return mcpResult(matchingDetail("correct-invoice", invoice.created_time.replace("Z", "+00:00")));
     }
     throw new Error(`Unexpected tool ${name}`);
   };

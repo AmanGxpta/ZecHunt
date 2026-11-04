@@ -245,7 +245,9 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     const detail = await this.mcpTool<McpInvoiceDetail>("get-invoice-by-id", { invoice_id: match.invoice_id });
     const payment = detail.detected_payment_info;
     const order = detail.orders?.[0];
-    if (detail.invoice_id !== match.invoice_id || detail.created_time !== match.created_time ||
+    if (detail.invoice_id !== match.invoice_id || !detail.created_time ||
+        !Number.isFinite(Date.parse(detail.created_time)) ||
+        Date.parse(detail.created_time) !== Date.parse(match.created_time) ||
         detail.orders?.length !== 1 || order?.product?.id !== PRODUCT_ID ||
         order.product.value !== String(PACKAGE_VALUE) || order.product.currency !== "INR" ||
         order.payment_method !== "balance" || payment?.method !== "balance" ||
