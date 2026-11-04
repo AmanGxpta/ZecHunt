@@ -45,8 +45,11 @@ const MOCK_CATALOG: RewardProduct[] = [
   { productId: "mock-myntra-400", name: "Myntra voucher ₹400", category: "shopping", priceCents: 454 },
   { productId: "mock-playstore-50", name: "Google Play ₹50", category: "gaming", priceCents: 57 },
   { productId: "mock-steam-250", name: "Steam wallet ₹250", category: "gaming", priceCents: 284 },
-  { productId: "mock-airtel-100", name: "Airtel recharge ₹100", category: "mobile-recharge", priceCents: 113 },
 ];
+for (const p of MOCK_CATALOG) {
+  const face = /₹(\d+)/.exec(p.name);
+  if (face) p.faceValue = { amountMinor: Number(face[1]) * 100, currency: "INR" };
+}
 
 export class MockBitrefillAdapter implements BitrefillAdapter {
   /** Invoices keyed by claimId, so a repeated purchase call returns the same invoice. */
