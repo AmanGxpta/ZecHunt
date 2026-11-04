@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { RewardCard } from "@/components/reward-card";
 import { HuntCamera, type SubmitResult } from "@/components/hunt/hunt-camera";
 import { requestMotionAccess } from "@/components/hunt/use-camera";
-import { Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr, ModeBadge, Shell, Spinner } from "@/components/ui";
+import { Button, Card, CATEGORY_LABEL, ErrorNote, Eyebrow, formatInr, ModeBadge, Shell, Spinner } from "@/components/ui";
 
 type Mode = "mock" | "live";
 interface PublicQuest {
@@ -32,6 +33,7 @@ export default function PlayerView({ id }: { id: string }) {
   const [missing, setMissing] = useState(false);
   const [claim, setClaim] = useState<ClaimView | null>(null);
   const [redemption, setRedemption] = useState<string | null>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,6 +53,7 @@ export default function PlayerView({ id }: { id: string }) {
           const cd = await cr.json();
           if (cd.claim) { claimRef.current = cd.claim; setClaim(cd.claim); }
           if (cd.redemptionData) setRedemption(cd.redemptionData);
+          if (cd.logoUrl) setLogoUrl(cd.logoUrl);
         }
       } catch {}
     };
@@ -120,7 +123,7 @@ export default function PlayerView({ id }: { id: string }) {
       {claim ? (
         claim.claimStatus === "reserved"
           ? <RewardPicker questId={id} onChosen={(c) => { claimRef.current = c; setClaim(c); }} />
-          : <Victory claim={claim} redemption={redemption} />
+          : <Victory claim={claim} redemption={redemption} logoUrl={logoUrl} questCategory={quest.rewardCategory} />
       ) : quest.status === "active" ? (
         <div className="mt-4 space-y-3">
           <Card className="space-y-4 border-lantern/30">
@@ -194,7 +197,7 @@ const REASONS: Record<string, string> = {
   insufficient_balance: "the reward balance is empty",
 };
 
-function Victory({ claim, redemption }: { claim: ClaimView; redemption: string | null }) {
+function Victory({ claim, redemption, logoUrl, questCategory }: { claim: ClaimView; redemption: string | null; logoUrl: string | null; questCategory: string }) {
   const p = claim.purchase;
   const delivered = claim.claimStatus === "delivered";
   const pending = claim.claimStatus === "purchase_pending" || claim.claimStatus === "reserved" || p?.state === "INVOICE_CREATED";
@@ -205,17 +208,8 @@ function Victory({ claim, redemption }: { claim: ClaimView; redemption: string |
         <p className="mt-1 font-display text-3xl">First to the checkpoint 🏆</p>
       </div>
       {delivered && p ? (
-        <div className="space-y-4">
-          <p className="text-muted">
-            Your reward: <span className="text-fg">{p.productName}</span>{/₹/.test(p.productName) ? null : ` (about ${formatInr(p.priceInr)})`}
-          </p>
-          {redemption ? (
-            <CopyField label={p.providerMode === "mock" ? "Redemption (SIMULATED, not a real code)" : "Your redemption code"} value={redemption} />
-          ) : (
-            <p className="text-sm text-muted">Delivered. Fetching your redemption details…</p>
-          )}
-          {p.providerMode === "mock" && <ModeBadge mode="mock" what="purchase: no money was spent" />}
-        </div>
+        <RewardCard productName={p.productName} category={questCategory === "any" ? null : questCategory} logoUrl={logoUrl}
+          redemption={redemption} simulated={p.providerMode === "mock"} />
       ) : pending ? (
         <p className="flex items-center gap-2 text-muted"><Spinner /> An agent is buying your reward within the creator’s limit…</p>
       ) : claim.claimStatus === "needs_reconciliation" ? (
