@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Qr } from "@/components/qr";
 import {
-  Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr, formatTaz, ModeBadge, Shell, Spinner,
+  Button, Card, CATEGORY_LABEL, CopyField, ErrorNote, Eyebrow, formatInr, formatTaz, ModeBadge, ShareButton, Shell, Spinner,
 } from "@/components/ui";
 import { loadSecrets, type CreatorSecrets } from "@/lib/client/creator-store";
 
@@ -184,6 +184,7 @@ export default function ManageView({ id }: { id: string }) {
             <Card className="space-y-4">
               <h2 className="font-display text-xl">Share with players</h2>
               <div className="flex justify-center"><Qr value={playUrl} size={168} label="Quest link QR code" /></div>
+              <ShareButton url={playUrl} title={q.title} text={`A treasure is hidden: “${q.title}”. First to find it wins a real reward.`} />
               <CopyField label="Quest link (public)" value={playUrl} />
             </Card>
             <Card className="space-y-4">

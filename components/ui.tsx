@@ -132,3 +132,20 @@ export const CATEGORY_LABEL: Record<string, string> = {
   "mobile-recharge": "Mobile recharge",
   gaming: "Gaming credit",
 };
+
+/** Native share sheet on phones; copies the link elsewhere. */
+export function ShareButton({ url, title, text }: { url: string; title: string; text: string }) {
+  const [copied, setCopied] = useState(false);
+  async function share() {
+    const nav = navigator as Navigator & { share?: (d: ShareData) => Promise<void> };
+    if (nav.share) {
+      try { await nav.share({ url, title, text }); return; } catch (e) {
+        if (e instanceof DOMException && e.name === "AbortError") return;
+      }
+    }
+    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch {}
+  }
+  return (
+    <Button onClick={share} className="w-full">{copied ? "Link copied ✓" : "Share the quest"}</Button>
+  );
+}
