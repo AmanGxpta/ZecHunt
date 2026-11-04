@@ -61,3 +61,7 @@ v1 (`lib/providers/types.ts`) keeps running the live app until both v2 adapters 
 ## Change log
 
 - **CR-1 (accepted 2026-11-04, proposed by Codex):** `ReconcileRequest.competingAttempts` is required. The app passes its other unresolved attempts that match on product, package and price. If any of them started at or before the candidate invoice, the result must be `ambiguous`, so reconciliation stays conservative even when the adapter's own ledger is lost. The conformance suite asserts this.
+- **CR-2 (accepted 2026-11-04):** `duplicate_attempt` never moves a claim to `failed`. Another attempt exists and may have charged, so the claim keeps its current state.
+- **CR-3 (accepted 2026-11-04):** `npm test` runs `tests/**/*.test.ts`, which includes the provider and conformance suites.
+- **CR-4 (accepted 2026-11-04):** v1 `RewardProduct.faceValue?: { amountMinor, currency }`. The app shows the face value when it's present. **Adapter follow-up:** the bridge should populate it.
+- **v1 certain-refusal signal (2026-11-04):** `PurchaseRejectedError(reasonCode)` in `lib/providers/types.ts`. The live provider wiring maps `BitrefillPurchaseRejected` onto it, and `fulfillClaim` fails the claim cleanly. Every other purchase error is still treated as uncertain.

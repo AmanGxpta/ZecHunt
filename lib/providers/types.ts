@@ -24,7 +24,22 @@ export interface RewardProduct {
   productId: string;
   name: string;
   category: string;
+  /** What we pay, USD cents. */
   priceCents: number;
+  /** What the winner receives, when the provider states it (CR-4), e.g. INR 5000 paise. */
+  faceValue?: { amountMinor: number; currency: "INR" | "USD" };
+}
+
+/**
+ * Thrown by purchaseApprovedReward ONLY when it is certain no money moved (refused before
+ * the money-moving call, or definitively refused by the provider). The app fails the claim
+ * cleanly. Any other error means the outcome is unknown: reconcile, never retry.
+ */
+export class PurchaseRejectedError extends Error {
+  constructor(readonly reasonCode: string) {
+    super(`Purchase refused before any charge: ${reasonCode}`);
+    this.name = "PurchaseRejectedError";
+  }
 }
 
 export interface PurchaseOrderStatus {
