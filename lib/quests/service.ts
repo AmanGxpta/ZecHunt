@@ -552,7 +552,9 @@ export async function fulfillClaim(
       Date.now(),
       claimId,
     );
-  } catch {
+  } catch (err) {
+    // Message only: adapters must never put credentials or redemption data in errors.
+    console.error(`[fulfillment] claim ${claimId} purchase uncertain:`, err instanceof Error ? err.message : String(err));
     markNeedsReconciliation(db, claimId, "purchase_call_failed");
     return loadOutcome(db, claimId, "purchase_call_failed");
   }
