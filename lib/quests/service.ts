@@ -10,7 +10,8 @@ import {
 import { checkSpend } from "../policy/spend-guard";
 import { currentCode, verifyCode } from "./checkpoint";
 import { centsToInr, INR_CAPS, inrCapToCents } from "../money";
-import type { BitrefillAdapter, ZcashAdapter } from "../providers/types";
+import type { BitrefillAdapter, RewardProduct, ZcashAdapter } from "../providers/types";
+import { recommendReward, type Recommendation } from "../agent/recommend";
 import { selectReward } from "../providers/select";
 
 export const MIN_CONFIRMATIONS = 1;
@@ -25,8 +26,12 @@ export type ProviderMode = "mock" | "live";
 /** Test-network activation threshold: 0.01 TAZ. Not an exchange rate. */
 export const DEFAULT_EXPECTED_ZATOSHIS = 1_000_000;
 export const MAX_REWARD_CAP_CENTS = 500;
-export const REWARD_CATEGORIES = ["food", "mobile-recharge", "gaming"] as const;
+export const REWARD_CATEGORIES = ["food", "shopping", "gaming", "mobile-recharge"] as const;
 export type RewardCategory = (typeof REWARD_CATEGORIES)[number];
+/** Creator lets the winner pick from every supported category. */
+export const ANY_CATEGORY = "any";
+/** What "winner's choice" offers: code-only categories (no phone number needed). */
+export const WINNER_CHOICE_CATEGORIES = ["food", "shopping", "gaming"] as const;
 
 /** Bitrefill credit available to the demo. Stored in cents. */
 export function bitrefillCreditCents(): number {
@@ -208,7 +213,7 @@ export async function createQuest(
   if (clue.length < 1 || clue.length > 500) {
     throw new DomainError("invalid_clue", 400, "Clue must be 1–500 characters");
   }
-  if (!(REWARD_CATEGORIES as readonly string[]).includes(input.rewardCategory)) {
+  if (input.rewardCategory !== ANY_CATEGORY && !(REWARD_CATEGORIES as readonly string[]).includes(input.rewardCategory)) {
     throw new DomainError("invalid_category", 400, "Unsupported reward category");
   }
   let rewardCapInr: number | null = null;
@@ -483,22 +488,22 @@ export async function fulfillClaim(
   db: DatabaseSync,
   bitrefill: BitrefillAdapter,
   claimId: string,
-  { now = Date.now(), bitrefillMode = "mock" as ProviderMode } = {},
+  { now = Date.now(), bitrefillMode = "mock" as ProviderMode, productId }: { now?: number; bitrefillMode?: ProviderMode; productId?: string } = {},
 ): Promise<ClaimOutcome> {
   const claim = db.prepare("SELECT * FROM claims WHERE id = ?").get(claimId) as ClaimRow | undefined;
   if (!claim) throw new DomainError("claim_not_found", 404);
   const q = loadQuest(db, claim.quest_id);
 
+  const products = await eligibleProducts(bitrefill, q);
   const credit = bitrefillCreditCents();
-  const products = await bitrefill.searchEligibleProducts({
-    country: rewardCountry(),
-    category: q.reward_category,
-    maxPriceCents: Math.min(q.reward_cap_cents, credit),
-  });
-  const product = selectReward(products, {
-    category: q.reward_category,
-    maxPriceCents: Math.min(q.reward_cap_cents, credit),
-  });
+  // The winner's pick must be one of the fresh, eligible results. Anything else is refused
+  // without touching the claim, so a stale or forged choice can't fail someone's win.
+  if (productId && !products.some((p) => p.productId === productId)) {
+    throw new DomainError("reward_unavailable", 409, "That reward is no longer available. Pick another.");
+  }
+  const product = productId
+    ? products.find((p) => p.productId === productId)!
+    : selectReward(products, { category: q.reward_category, maxPriceCents: Math.min(q.reward_cap_cents, credit) });
 
   // Guard + persistence in one transaction so two claims cannot both spend the same credit.
   const decision = tx(db, () => {
@@ -515,7 +520,7 @@ export async function fulfillClaim(
       winnerSlotReserved: true,
       claimHasNoPurchase: !db.prepare("SELECT 1 FROM purchase_attempts WHERE claim_id = ?").get(claimId),
       productCategory: product.category,
-      requiredCategory: q.reward_category,
+      requiredCategory: q.reward_category === ANY_CATEGORY ? product.category : q.reward_category,
       quotedCents: product.priceCents,
       rewardCapCents: q.reward_cap_cents,
       creditRemainingCents: credit - reservedCents(db),
@@ -660,4 +665,52 @@ export function getClaimStatus(db: DatabaseSync, questId: string, playerSession:
     .prepare("SELECT id FROM claims WHERE quest_id = ? AND player_session = ?")
     .get(questId, playerSession) as { id: string } | undefined;
   return claim ? loadOutcome(db, claim.id) : null;
+}
+
+/** Every product the guard could approve for this quest right now, across its allowed categories. */
+async function eligibleProducts(bitrefill: BitrefillAdapter, q: QuestRow): Promise<RewardProduct[]> {
+  const maxPriceCents = Math.min(q.reward_cap_cents, bitrefillCreditCents());
+  const categories: string[] = q.reward_category === ANY_CATEGORY ? [...WINNER_CHOICE_CATEGORIES] : [q.reward_category];
+  const lists = await Promise.all(categories.map((category) =>
+    bitrefill.searchEligibleProducts({ country: rewardCountry(), category, maxPriceCents }).catch(() => [] as RewardProduct[])));
+  const seen = new Set<string>();
+  return lists.flat().filter((p) => {
+    const ok = categories.includes(p.category) && Number.isInteger(p.priceCents) && p.priceCents > 0 &&
+      p.priceCents <= maxPriceCents && !seen.has(p.productId);
+    seen.add(p.productId);
+    return ok;
+  });
+}
+
+export interface RewardOption {
+  productId: string;
+  name: string;
+  category: string;
+  priceCents: number;
+  priceInr: number;
+}
+
+/** The caller's claim on this quest if it is still waiting for a reward choice. */
+export function reservedClaimFor(db: DatabaseSync, questId: string, playerSession: string): string {
+  const claim = db.prepare("SELECT id, status FROM claims WHERE quest_id = ? AND player_session = ?").get(questId, playerSession) as
+    { id: string; status: string } | undefined;
+  if (!claim) throw new DomainError("not_winner", 403, "Only the winner can choose a reward");
+  if (claim.status !== "reserved") throw new DomainError("reward_already_chosen", 409, "The reward has already been chosen");
+  return claim.id;
+}
+
+/** Options for the winner's reserved claim, plus the agent's recommendation. */
+export async function listRewardOptions(
+  db: DatabaseSync,
+  bitrefill: BitrefillAdapter,
+  questId: string,
+  playerSession: string,
+): Promise<{ claimId: string; options: RewardOption[]; recommendation: Recommendation | null }> {
+  const claimId = reservedClaimFor(db, questId, playerSession);
+  const q = loadQuest(db, questId);
+  const options = (await eligibleProducts(bitrefill, q)).map((p) => ({
+    productId: p.productId, name: p.name, category: p.category, priceCents: p.priceCents, priceInr: centsToInr(p.priceCents),
+  }));
+  const recommendation = await recommendReward(options, { capCents: q.reward_cap_cents, questTitle: q.title });
+  return { claimId, options, recommendation };
 }

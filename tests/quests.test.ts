@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { openDatabase } from "../lib/db";
+
+// Tests never call the model; the rule-based recommender stands in.
+process.env.ZECHUNT_AGENT = "off";
 import { DomainError } from "../lib/errors";
 import { MockBitrefillAdapter, MockZcashAdapter } from "../lib/providers/mock";
 import type { BitrefillAdapter } from "../lib/providers/types";
@@ -9,6 +12,7 @@ import {
   createQuest,
   fulfillClaim,
   getClaimStatus,
+  listRewardOptions,
   CHECKPOINT_LIMITS,
   getCheckpointCode,
   reconcileFulfillments,
@@ -273,10 +277,10 @@ test("credit limit caps the reward budget across quests", async () => {
   try {
     const ctx = setup();
     const created = await fundedQuest(ctx, "food", 500);
-    // Cap is $5, credit is $3: the $5 product is excluded, the $3 product is allowed.
+    // Cap is $5, credit is $3: the $4.54 product is excluded, the $2.84 (₹250) product is allowed.
     const outcome = await winAs(ctx, created.questId, codeOf(ctx, created.questId), "alice");
     assert.ok(!("error" in outcome));
-    assert.equal(outcome.purchase?.priceCents, 300);
+    assert.equal(outcome.purchase?.priceCents, 284);
   } finally {
     process.env.BITREFILL_CREDIT_USD = prior;
   }
@@ -383,4 +387,25 @@ test("an uncertain purchase is adopted from the provider's invoice history, neve
   const again = await reconcileFulfillments(ctx.db, flaky);
   assert.equal(again.adopted, 0);
   assert.equal(reconciles, 1);
+});
+
+test("the winner picks a reward: options span winner's-choice categories, a forged pick changes nothing", async () => {
+  const ctx = setup();
+  const created = await fundedQuest(ctx, "any", 300);
+  const { claimToken } = submitCheckpoint(ctx.db, created.questId, codeOf(ctx, created.questId), "alice");
+  const r = reserveWinnerSlot(ctx.db, created.questId, claimToken, "alice");
+  assert.ok("claimId" in r);
+  const { options, recommendation } = await listRewardOptions(ctx.db, ctx.bitrefill, created.questId, "alice");
+  assert.ok(new Set(options.map((o) => o.category)).size >= 3, "winner's choice spans categories");
+  assert.ok(options.every((o) => o.priceCents <= 300));
+  assert.ok(recommendation && options.some((o) => o.productId === recommendation.productId));
+  await assert.rejects(listRewardOptions(ctx.db, ctx.bitrefill, created.questId, "mallory"),
+    (e: unknown) => e instanceof DomainError && e.code === "not_winner");
+  await assert.rejects(fulfillClaim(ctx.db, ctx.bitrefill, r.claimId, { productId: "mock-myntra-400" }),
+    (e: unknown) => e instanceof DomainError && e.code === "reward_unavailable");
+  assert.equal(getClaimStatus(ctx.db, created.questId, "alice")?.claimStatus, "reserved");
+  const pick = options.find((o) => o.category === "gaming")!;
+  const outcome = await fulfillClaim(ctx.db, ctx.bitrefill, r.claimId, { productId: pick.productId });
+  assert.equal(outcome.purchase?.productName, pick.name);
+  assert.equal(outcome.claimStatus, "delivered");
 });

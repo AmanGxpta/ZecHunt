@@ -11,7 +11,7 @@ export function selectReward(
   const eligible = products
     .filter(
       (p) =>
-        p.category === constraints.category &&
+        (constraints.category === "any" || p.category === constraints.category) &&
         Number.isInteger(p.priceCents) &&
         p.priceCents > 0 &&
         p.priceCents <= constraints.maxPriceCents,
