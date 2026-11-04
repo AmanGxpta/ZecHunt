@@ -48,6 +48,10 @@ export default function CheckpointView({ id }: { id: string }) {
           <h1 className="font-display text-2xl">{code.title}</h1>
           {code.status === "exhausted" ? (
             <p className="max-w-sm text-lg text-muted">This quest has been won. You can stop showing the code.</p>
+          ) : code.status === "paused" ? (
+            <p className="max-w-sm text-lg text-muted">The organiser paused this quest. Keep this screen open; the code comes back when it resumes.</p>
+          ) : code.status === "cancelled" ? (
+            <p className="max-w-sm text-lg text-muted">This quest was cancelled. You can stop showing the code.</p>
           ) : code.status !== "active" ? (
             <p className="max-w-sm text-lg text-muted">Waiting for the quest to be funded. The code will work once it’s live.</p>
           ) : null}

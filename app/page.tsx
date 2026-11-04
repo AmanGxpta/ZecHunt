@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Mark } from "@/components/ui";
+import { Mark, MyQuestsLink } from "@/components/ui";
 
 const steps = [
   { n: "01", t: "Fund it privately", d: "Activate your quest with a shielded Zcash testnet payment. The chain hides who paid, and how much." },
@@ -15,7 +15,10 @@ export default function Home() {
           <Mark />
           <span className="font-display text-lg tracking-tight">zec<span className="text-lantern">Hunt</span></span>
         </div>
-        <span className="rounded-full border border-line px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-muted">Testnet</span>
+        <span className="flex items-center gap-3">
+          <MyQuestsLink />
+          <span className="rounded-full border border-line px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-muted">Testnet</span>
+        </span>
       </header>
 
       <section className="rise space-y-6">

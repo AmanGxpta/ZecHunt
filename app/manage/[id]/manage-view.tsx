@@ -11,7 +11,7 @@ import { loadSecrets, type CreatorSecrets } from "@/lib/client/creator-store";
 type Mode = "mock" | "live";
 interface CreatorQuest {
   id: string; title: string; clue: string; rewardCategory: string; rewardCapCents: number; rewardCapInr: number;
-  status: "awaiting_funding" | "active" | "exhausted"; fundingAddress: string;
+  status: "awaiting_funding" | "active" | "paused" | "exhausted" | "cancelled"; fundingAddress: string;
   expectedZatoshis: number; fundedZatoshis: number; activatedAt: number | null; zcashMode: Mode;
   fundingEvents: { txid: string; amountZatoshis: number; confirmations: number }[];
   winner: { claimStatus: string; productName: string | null; purchaseState: string | null; providerMode: string | null } | null;
@@ -42,7 +42,7 @@ export default function ManageView({ id }: { id: string }) {
       try {
         // POST scans the wallet while awaiting funding; GET just reads state.
         const res = await fetch(`/api/quests/${id}/funding`, {
-          method: status.current === "active" || status.current === "exhausted" ? "GET" : "POST",
+          method: status.current === "awaiting_funding" || status.current === null ? "POST" : "GET",
           headers: { "x-creator-token": secrets.creatorToken },
         });
         const body = await res.json();
@@ -93,7 +93,7 @@ export default function ManageView({ id }: { id: string }) {
   const manageUrl = `${origin}/manage/${q.id}#t=${encodeURIComponent(secrets.creatorToken)}&k=${encodeURIComponent(secrets.checkpointKey)}`;
   const taz = (q.expectedZatoshis / 1e8).toString();
   const zip321 = `zcash:${q.fundingAddress}?amount=${taz}&message=${encodeURIComponent(`zecHunt ${q.title}`)}`;
-  const funded = q.status !== "awaiting_funding";
+  const funded = q.status !== "awaiting_funding" && q.status !== "cancelled";
 
   return (
     <Shell wide>
@@ -113,7 +113,17 @@ export default function ManageView({ id }: { id: string }) {
 
       {error && <div className="mb-4"><ErrorNote>{error}</ErrorNote></div>}
 
-      {!funded ? (
+      <Controls quest={q} token={secrets.creatorToken} onChange={(next) => { status.current = next.quest.status; setData(next); }} />
+
+      {q.status === "cancelled" ? (
+        <Card>
+          <h2 className="font-display text-2xl">Cancelled</h2>
+          <p className="mt-1 text-sm leading-6 text-muted">
+            Players see that this quest was called off, and the checkpoint code no longer works. No reward was bought.
+            Testnet TAZ sent to fund it isn’t returned; it has no monetary value.
+          </p>
+        </Card>
+      ) : !funded ? (
         <Card className="space-y-5">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -215,6 +225,64 @@ export default function ManageView({ id }: { id: string }) {
         <CopyField label="Manage link" value={manageUrl} />
       </details>
     </Shell>
+  );
+}
+
+function Controls({ quest, token, onChange }: { quest: CreatorQuest; token: string; onChange: (r: Resp) => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function act(action: "pause" | "resume" | "cancel") {
+    setBusy(action); setError(null);
+    try {
+      const r = await fetch(`/api/quests/${quest.id}/control`, {
+        method: "POST", headers: { "content-type": "application/json", "x-creator-token": token }, body: JSON.stringify({ action }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.message ?? "That didn’t work");
+      onChange(d); setConfirming(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "That didn’t work");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const canCancel = !quest.winner && quest.status !== "cancelled" && quest.status !== "exhausted";
+  return (
+    <div className="mb-4 space-y-2">
+      {quest.status === "paused" && (
+        <div className="rounded-xl border border-lantern/40 bg-lantern/5 px-4 py-3 text-sm text-fg">
+          Paused. Players can’t claim and the checkpoint shows a pause notice.
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        {quest.status === "active" && (
+          <Button variant="ghost" onClick={() => act("pause")} disabled={!!busy}>{busy === "pause" ? <Spinner /> : "Pause"}</Button>
+        )}
+        {quest.status === "paused" && (
+          <Button onClick={() => act("resume")} disabled={!!busy}>{busy === "resume" ? <Spinner /> : "Resume"}</Button>
+        )}
+        <Link href={`/create?from=${quest.id}`}
+          className="inline-flex min-h-12 items-center justify-center rounded-xl border border-line px-5 font-semibold text-fg hover:border-lantern/60 hover:text-lantern">
+          Run it again
+        </Link>
+        {canCancel && !confirming && (
+          <Button variant="ghost" onClick={() => setConfirming(true)} disabled={!!busy}>Cancel quest</Button>
+        )}
+      </div>
+      {confirming && (
+        <div className="rounded-xl border border-ember/40 bg-ember/5 p-4 text-sm">
+          <p className="text-fg">Cancel “{quest.title}”? Players will see it was called off. This can’t be undone.</p>
+          <div className="mt-3 flex gap-2">
+            <Button onClick={() => act("cancel")} disabled={!!busy}>{busy === "cancel" ? <Spinner /> : "Yes, cancel it"}</Button>
+            <Button variant="ghost" onClick={() => setConfirming(false)} disabled={!!busy}>Keep it</Button>
+          </div>
+        </div>
+      )}
+      {error && <ErrorNote>{error}</ErrorNote>}
+    </div>
   );
 }
 
