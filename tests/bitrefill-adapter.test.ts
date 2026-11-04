@@ -95,7 +95,7 @@ test("a failed invoice call leaves an uncertain reservation and is never retried
   try {
     const input = { claimId: "claim-uncertain", productId: "swiggy-money-india:50", expectedMaxPriceCents: 55 };
     await assert.rejects(adapter.purchaseApprovedReward(input), /failed \(Error\)/);
-    await assert.rejects(adapter.purchaseApprovedReward(input), /found 0 matching invoices/);
+    await assert.rejects(adapter.purchaseApprovedReward(input), /found 0 candidate invoices/);
     assert.equal(posts, 1);
   } finally {
     adapter.close();
@@ -114,6 +114,10 @@ test("a reserved attempt adopts exactly one later product invoice without anothe
       in_stock: true, recipient_type: "none", packages: [{ package_value: "50", payment_price: "0.55", payment_currency: "USD" }] });
     if (name === "buy-products") { buys++; throw new DOMException("timed out", "TimeoutError"); }
     if (name === "list-invoices") return mcpResult({ invoices: listed, count: listed.length });
+    if (name === "get-invoice-by-id") {
+      const invoice = listed.find((item) => (item as { invoice_id: string }).invoice_id === "correct-invoice") as { created_time: string };
+      return mcpResult(matchingDetail("correct-invoice", invoice.created_time.replace("Z", "+00:00")));
+    }
     throw new Error(`Unexpected tool ${name}`);
   };
   approveOnePurchase(dbPath, 55, Date.now() + 60_000);
@@ -123,11 +127,11 @@ test("a reserved attempt adopts exactly one later product invoice without anothe
     const before = Date.now();
     await assert.rejects(adapter.purchaseApprovedReward(input), /timed out/);
     listed = [{ invoice_id: "older-invoice", created_time: new Date(before - 1000).toISOString(),
-      orders: [{ product_id: "swiggy-money-india" }] },
+      orders: [{ product_id: "swiggy-money-india", value: "50", currency: "INR" }] },
     { invoice_id: "other-product", created_time: new Date(before + 1000).toISOString(),
       orders: [{ product_id: "other-product" }] },
     { invoice_id: "correct-invoice", invoice_status: "complete", created_time: new Date(before + 1000).toISOString(),
-      orders: [{ product_id: "swiggy-money-india" }] }];
+      orders: [{ product_id: "swiggy-money-india", value: "50", currency: "INR" }] }];
     const recovered = await adapter.purchaseApprovedReward(input);
     assert.deepEqual(recovered, { invoiceId: "correct-invoice", status: "complete" });
     assert.deepEqual(await adapter.purchaseApprovedReward(input), recovered);
@@ -146,7 +150,7 @@ test("ambiguous invoice history leaves a reservation untouched", async () => {
       in_stock: true, recipient_type: "none", packages: [{ package_value: "50", payment_price: "0.55", payment_currency: "USD" }] });
     if (name === "buy-products") { buys++; throw new Error("connection lost"); }
     if (name === "list-invoices") return mcpResult({ count: 2, invoices: ["one", "two"].map((invoice_id) => ({
-      invoice_id, created_time: later, orders: [{ product_id: "swiggy-money-india" }],
+      invoice_id, created_time: later, orders: [{ product_id: "swiggy-money-india", value: "50", currency: "INR" }],
     })) });
     throw new Error(`Unexpected tool ${name}`);
   };
@@ -155,9 +159,63 @@ test("ambiguous invoice history leaves a reservation untouched", async () => {
   try {
     const input = { claimId: "claim-ambiguous", productId: "swiggy-money-india:50", expectedMaxPriceCents: 55 };
     await assert.rejects(adapter.purchaseApprovedReward(input), /failed \(Error\)/);
-    await assert.rejects(adapter.reconcileReservedPurchase(input.claimId), /found 2 matching invoices/);
-    await assert.rejects(adapter.purchaseApprovedReward(input), /found 2 matching invoices/);
+    await assert.rejects(adapter.reconcileReservedPurchase(input.claimId), /found 2 candidate invoices/);
+    await assert.rejects(adapter.purchaseApprovedReward(input), /found 2 candidate invoices/);
     assert.equal(buys, 1);
+  } finally { adapter.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a same-product invoice with a different USD charge is not adopted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "zechunt-bitrefill-price-"));
+  const dbPath = join(dir, "purchase.db");
+  const created = new Date(Date.now() + 1000).toISOString();
+  let buys = 0;
+  const fakeFetch: typeof fetch = async (_url, init) => {
+    const { name } = JSON.parse(String(init?.body)).params;
+    if (name === "get-product-details") return mcpResult({ id: "swiggy-money-india", country_code: "IN",
+      in_stock: true, recipient_type: "none", packages: [{ package_value: "50", payment_price: "0.55", payment_currency: "USD" }] });
+    if (name === "buy-products") { buys++; throw new Error("reply lost"); }
+    if (name === "list-invoices") return mcpResult({ count: 1, invoices: [{ invoice_id: "wrong-price",
+      created_time: created, orders: [{ product_id: "swiggy-money-india", value: "50", currency: "INR" }] }] });
+    if (name === "get-invoice-by-id") return mcpResult(matchingDetail("wrong-price", created, "0.60"));
+    throw new Error(`Unexpected tool ${name}`);
+  };
+  approveOnePurchase(dbPath, 55, Date.now() + 60_000);
+  const adapter = new RestBitrefillAdapter({ apiKey: "test-key", dbPath, livePurchases: true, fetchImpl: fakeFetch });
+  try {
+    const input = { claimId: "claim-price", productId: "swiggy-money-india:50", expectedMaxPriceCents: 55 };
+    await assert.rejects(adapter.purchaseApprovedReward(input), /failed \(Error\)/);
+    await assert.rejects(adapter.reconcileReservedPurchase(input.claimId), /details do not match/);
+    assert.equal(buys, 1);
+  } finally { adapter.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("overlapping unresolved attempts cannot adopt one invoice", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "zechunt-bitrefill-overlap-"));
+  const dbPath = join(dir, "purchase.db");
+  const created = new Date(Date.now() + 1000).toISOString();
+  let buys = 0;
+  const fakeFetch: typeof fetch = async (_url, init) => {
+    const { name } = JSON.parse(String(init?.body)).params;
+    if (name === "get-product-details") return mcpResult({ id: "swiggy-money-india", country_code: "IN",
+      in_stock: true, recipient_type: "none", packages: [{ package_value: "50", payment_price: "0.55", payment_currency: "USD" }] });
+    if (name === "buy-products") { buys++; throw new Error("reply lost"); }
+    if (name === "list-invoices") return mcpResult({ count: 1, invoices: [{ invoice_id: "shared-invoice",
+      created_time: created, orders: [{ product_id: "swiggy-money-india", value: "50", currency: "INR" }] }] });
+    if (name === "get-invoice-by-id") return mcpResult(matchingDetail("shared-invoice", created));
+    throw new Error(`Unexpected tool ${name}`);
+  };
+  approveOnePurchase(dbPath, 55, Date.now() + 60_000);
+  approveOnePurchase(dbPath, 55, Date.now() + 60_000);
+  const adapter = new RestBitrefillAdapter({ apiKey: "test-key", dbPath, livePurchases: true,
+    dailyCapCents: 110, totalCapCents: 110, fetchImpl: fakeFetch });
+  try {
+    for (const claimId of ["claim-a", "claim-b"]) {
+      await assert.rejects(adapter.purchaseApprovedReward({ claimId, productId: "swiggy-money-india:50", expectedMaxPriceCents: 55 }), /failed \(Error\)/);
+    }
+    await assert.rejects(adapter.reconcileReservedPurchase("claim-a"), /overlaps another unresolved purchase attempt/);
+    await assert.rejects(adapter.reconcileReservedPurchase("claim-b"), /overlaps another unresolved purchase attempt/);
+    assert.equal(buys, 2);
   } finally { adapter.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -174,4 +232,10 @@ test("MCP error reports safe envelope diagnostics", async () => {
 function mcpResult(data: unknown): Response {
   return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1,
     result: { content: [{ type: "text", text: JSON.stringify(data) }] } }));
+}
+
+function matchingDetail(invoiceId: string, createdTime: string, price = "0.55") {
+  return { invoice_id: invoiceId, invoice_status: "complete", created_time: createdTime,
+    detected_payment_info: { method: "balance", currency: "USD", price, status: "complete" },
+    orders: [{ product: { id: "swiggy-money-india", value: "50", currency: "INR" }, payment_method: "balance" }] };
 }

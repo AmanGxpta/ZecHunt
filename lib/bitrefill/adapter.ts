@@ -47,6 +47,7 @@ interface Attempt {
   state: string;
   invoice_id: string | null;
   reward_id: string;
+  quoted_cents: number;
   created_at: number;
 }
 
@@ -54,7 +55,18 @@ interface ListedInvoice {
   invoice_id: string;
   invoice_status?: string;
   created_time: string;
-  orders?: Array<{ product_id?: string }>;
+  orders?: Array<{ product_id?: string; value?: string; currency?: string }>;
+}
+
+interface McpInvoiceDetail {
+  invoice_id?: string;
+  invoice_status?: string;
+  created_time?: string;
+  detected_payment_info?: { method?: string; currency?: string; price?: string; status?: string };
+  orders?: Array<{
+    product?: { id?: string; value?: string; currency?: string };
+    payment_method?: string;
+  }>;
 }
 
 export function usdToCents(value: string | number): number {
@@ -65,8 +77,17 @@ export function usdToCents(value: string | number): number {
   return Number(cents);
 }
 
-/** A human-only local operation. Never expose this method as an agent or player API. */
-export function approveOnePurchase(dbPath: string, maxPriceCents: number, expiresAt: number): void {
+/** Approval scope that the v1 bridge accepts for ANY catalog product (still price-bounded and one-use). */
+export const ANY_CATALOG_PRODUCT = "*";
+
+/**
+ * A human-only local operation. Never expose this method as an agent or player API.
+ * `rewardId` scopes the approval: the default is Swiggy ₹50 (the v1 adapter's only
+ * product); a catalog key ("<productId>:<packageValue>") or ANY_CATALOG_PRODUCT is
+ * honoured only by the v1 bridge.
+ */
+export function approveOnePurchase(dbPath: string, maxPriceCents: number, expiresAt: number, rewardId: string = REWARD_ID): void {
+  if (!/^(\*|[a-z0-9_-]{1,100}:[0-9]{1,6})$/.test(rewardId)) throw new Error("Invalid approval scope");
   if (!Number.isSafeInteger(maxPriceCents) || maxPriceCents <= 0 || maxPriceCents > 500) {
     throw new Error("Approval cap must be between 1 and 500 cents");
   }
@@ -76,16 +97,17 @@ export function approveOnePurchase(dbPath: string, maxPriceCents: number, expire
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   try {
-    initialize(db);
+    initializeV1Ledger(db);
     db.prepare(
       "INSERT INTO bitrefill_approvals (reward_id, max_price_cents, expires_at, used_at) VALUES (?, ?, ?, NULL)",
-    ).run(REWARD_ID, maxPriceCents, expiresAt);
+    ).run(rewardId, maxPriceCents, expiresAt);
   } finally {
     db.close();
   }
 }
 
-function initialize(db: DatabaseSync): void {
+/** Creates the v1 approval and attempt tables if missing (shared with the v1 bridge). */
+export function initializeV1Ledger(db: DatabaseSync): void {
   db.exec("PRAGMA busy_timeout = 30000");
   db.exec(`CREATE TABLE IF NOT EXISTS bitrefill_approvals (
     id INTEGER PRIMARY KEY,
@@ -115,7 +137,7 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     if (!options.apiKey) throw new Error("Bitrefill API key is required");
     if (options.dbPath !== ":memory:") mkdirSync(dirname(options.dbPath), { recursive: true });
     this.db = new DatabaseSync(options.dbPath);
-    initialize(this.db);
+    initializeV1Ledger(this.db);
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.baseUrl = options.baseUrl ?? "https://api.bitrefill.com/v2";
     this.mcpUrl = options.mcpUrl ?? "https://api.bitrefill.com/mcp";
@@ -140,7 +162,7 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     if (!this.options.livePurchases) throw new Error("Bitrefill purchases are disabled (dry run)");
     if (!input.claimId || input.productId !== REWARD_ID) throw new Error("Product is not allowlisted");
     const prior = this.db.prepare(
-      "SELECT state, invoice_id, reward_id, created_at FROM bitrefill_attempts WHERE claim_id = ?",
+      "SELECT state, invoice_id, reward_id, quoted_cents, created_at FROM bitrefill_attempts WHERE claim_id = ?",
     ).get(input.claimId) as Attempt | undefined;
     if (prior) {
       if (prior.invoice_id) return { invoiceId: prior.invoice_id, status: prior.state };
@@ -204,7 +226,7 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
   /** Read-only provider lookup; only the local invoice association is changed. Never calls buy-products. */
   async reconcileReservedPurchase(claimId: string): Promise<{ invoiceId: string; status: string }> {
     const attempt = this.db.prepare(
-      "SELECT state, invoice_id, reward_id, created_at FROM bitrefill_attempts WHERE claim_id = ?",
+      "SELECT state, invoice_id, reward_id, quoted_cents, created_at FROM bitrefill_attempts WHERE claim_id = ?",
     ).get(claimId) as Attempt | undefined;
     if (!attempt || attempt.reward_id !== REWARD_ID) throw new Error("No matching Bitrefill purchase attempt");
     if (attempt.invoice_id) return { invoiceId: attempt.invoice_id, status: attempt.state };
@@ -218,16 +240,43 @@ export class RestBitrefillAdapter implements BitrefillAdapter {
     if (listing.invoices.length >= 20 || (typeof listing.count === "number" && listing.count > listing.invoices.length)) {
       throw new Error("Bitrefill invoice list is incomplete; cannot reconcile safely");
     }
-    const matches = listing.invoices.filter((invoice) =>
+    const candidates = listing.invoices.filter((invoice) =>
       typeof invoice.invoice_id === "string" &&
       Number.isFinite(Date.parse(invoice.created_time)) &&
       Date.parse(invoice.created_time) >= attempt.created_at &&
-      invoice.orders?.length === 1 && invoice.orders[0]?.product_id === PRODUCT_ID);
-    if (matches.length !== 1) throw new Error(`Bitrefill reconciliation found ${matches.length} matching invoices; expected exactly one`);
-    const match = matches[0];
-    const status = match.invoice_status ?? "pending";
+      invoice.orders?.length === 1 &&
+      invoice.orders[0]?.product_id === PRODUCT_ID &&
+      invoice.orders[0]?.value === String(PACKAGE_VALUE) &&
+      invoice.orders[0]?.currency === "INR");
+    if (candidates.length !== 1) throw new Error(`Bitrefill reconciliation found ${candidates.length} candidate invoices; expected exactly one`);
+    const match = candidates[0];
+    // The history summary does not contain the USD charge. Verify the invoice
+    // itself before adopting it; never correlate a paid order by time alone.
+    const detail = await this.mcpTool<McpInvoiceDetail>("get-invoice-by-id", { invoice_id: match.invoice_id });
+    const payment = detail.detected_payment_info;
+    const order = detail.orders?.[0];
+    if (detail.invoice_id !== match.invoice_id || !detail.created_time ||
+        !Number.isFinite(Date.parse(detail.created_time)) ||
+        Date.parse(detail.created_time) !== Date.parse(match.created_time) ||
+        detail.orders?.length !== 1 || order?.product?.id !== PRODUCT_ID ||
+        order.product.value !== String(PACKAGE_VALUE) || order.product.currency !== "INR" ||
+        order.payment_method !== "balance" || payment?.method !== "balance" ||
+        payment.currency !== "USD" || payment.status !== "complete" ||
+        !payment.price || usdToCents(payment.price) !== attempt.quoted_cents) {
+      throw new Error("Bitrefill invoice details do not match the reserved product, denomination, USD charge, and payment method");
+    }
+    const status = detail.invoice_status ?? match.invoice_status ?? "pending";
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Another unresolved claim could plausibly own this invoice. The provider
+      // supplies no claim correlation key, so overlapping attempts need review.
+      if (this.db.prepare(
+        `SELECT 1 FROM bitrefill_attempts
+         WHERE claim_id <> ? AND reward_id = ? AND quoted_cents = ?
+           AND invoice_id IS NULL AND created_at <= ? LIMIT 1`,
+      ).get(claimId, attempt.reward_id, attempt.quoted_cents, Date.parse(match.created_time))) {
+        throw new Error("Bitrefill invoice overlaps another unresolved purchase attempt; operator review required");
+      }
       if (this.db.prepare("SELECT 1 FROM bitrefill_attempts WHERE invoice_id = ? AND claim_id <> ?").get(match.invoice_id, claimId)) {
         throw new Error("Bitrefill invoice is already associated with another claim");
       }
