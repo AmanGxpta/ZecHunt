@@ -48,6 +48,16 @@ test("search: every buyable product in the category, with clean titles and live 
   ]);
   assert.ok(food.every((p) => p.category === "food"));
   assert.deepEqual(food[0].faceValue, { amountMinor: 5000, currency: "INR" }, "CR-4: face value as the provider states it");
+  assert.ok(food.every((p) => p.imageUrl?.startsWith("https://cdn.bitrefill.com/")), "every product carries its stored logo");
+  // A catalog with a foreign or non-https image URL gets no logo, never the bad URL.
+  for (const imageUrl of ["http://cdn.bitrefill.com/x.png", "https://evil.example/x.png", "https://cdn.bitrefill.com.evil.example/x.png", "javascript:alert(1)"]) {
+    const bad = REWARD_CATALOG.map((e) => ({ ...e, imageUrl }));
+    const b = new CatalogBitrefillBridge({ apiKey: FIXTURE_KEY, dbPath: ":memory:", livePurchases: false,
+      perPurchaseCapCents: 500, dailyCapCents: 500, totalCapCents: 500, fetchImpl: s.t.fetch, catalog: bad });
+    const out = await b.searchEligibleProducts({ ...SEARCH, category: "food" });
+    assert.ok(out.length > 0 && out.every((p) => p.imageUrl === undefined), imageUrl);
+    b.close();
+  }
   assert.ok(food.every((p) => p.faceValue?.currency === "INR" && p.faceValue.amountMinor === Number(p.productId.split(":")[1]) * 100));
   const gaming = await s.bridge.searchEligibleProducts({ ...SEARCH, category: "gaming", maxPriceCents: 120 });
   assert.deepEqual(gaming.map((p) => p.productId), ["google-play-india:50", "google-play-india:100"]);
