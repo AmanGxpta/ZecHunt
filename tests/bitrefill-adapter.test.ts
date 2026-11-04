@@ -45,10 +45,11 @@ test("a one-use approval permits one purchase and duplicate claims reuse its inv
     apiKey: "test-key", dbPath, livePurchases: true, accountPricesAreUsd: true, fetchImpl: fakeFetch,
   });
   try {
-    assert.deepEqual(await adapter.searchEligibleProducts({ category: "food", maxPriceCents: 100 }), []);
+    assert.deepEqual(await adapter.searchEligibleProducts({ country: "IN", category: "food", maxPriceCents: 100 }), []);
     approveOnePurchase(dbPath, 55, Date.now() + 60_000);
-    assert.deepEqual(await adapter.searchEligibleProducts({ category: "food", maxPriceCents: 54 }), []);
-    const eligible = await adapter.searchEligibleProducts({ category: "food", maxPriceCents: 55 });
+    assert.deepEqual(await adapter.searchEligibleProducts({ country: "IN", category: "food", maxPriceCents: 54 }), []);
+    assert.deepEqual(await adapter.searchEligibleProducts({ country: "US", category: "food", maxPriceCents: 55 }), []);
+    const eligible = await adapter.searchEligibleProducts({ country: "IN", category: "food", maxPriceCents: 55 });
     assert.deepEqual(eligible, [{ productId: "swiggy-money-india:50", name: "Swiggy Money ₹50", category: "food", priceCents: 55 }]);
     await assert.rejects(adapter.purchaseApprovedReward({ claimId: "claim-1", productId: eligible[0].productId, expectedMaxPriceCents: 54 }), /price exceeds/);
     assert.equal(posts, 0);
